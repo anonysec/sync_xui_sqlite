@@ -1,11 +1,8 @@
 #!/bin/bash
-
 # ============================================
 #  WinNet XUI Sync - Installer & Manager
 # ============================================
-
 set -e
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -14,21 +11,18 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 BOLD='\033[1m'
-
 GITHUB_RAW="https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main"
-
 # Client Sync
 SCRIPT_PATH="/usr/local/bin/sync_xui_sqlite.py"
 SERVICE_PATH="/etc/systemd/system/sync_xui.service"
-
 # Tunnel Sync
 TUNNEL_SCRIPT_PATH="/usr/local/bin/sync_inbound_tunnel.py"
 TUNNEL_SERVICE_PATH="/etc/systemd/system/sync_inbound_tunnel.service"
-
 VENV_PATH="/opt/xui_sync_env"
 DB_PATH="/etc/x-ui/x-ui.db"
 CLI_CMD="/usr/local/bin/winnet-xui"
-
+# Expire Disable feature flag file
+EXPIRE_DISABLE_FLAG="/etc/x-ui/expire_disable_enabled"
 print_banner() {
     clear
     echo -e "${CYAN}${BOLD}"
@@ -39,19 +33,16 @@ print_banner() {
     echo "========================================"
     echo -e "${NC}"
 }
-
 print_status() { echo -e "${GREEN}[OK]${NC} $1"; }
 print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 print_info() { echo -e "${BLUE}[i]${NC} $1"; }
 print_warn() { echo -e "${YELLOW}[!]${NC} $1"; }
-
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
         print_error "Please run as root: sudo bash install.sh"
         exit 1
     fi
 }
-
 get_service_status() {
     local svc="$1"
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -64,11 +55,9 @@ get_service_status() {
         echo -e "${RED}Not Installed${NC}"
     fi
 }
-
 is_installed() {
     [ -f "$SCRIPT_PATH" ] && [ -f "$SERVICE_PATH" ]
 }
-
 install_cli() {
     cat > "$CLI_CMD" << 'EOFCLI'
 #!/bin/bash
@@ -80,7 +69,6 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 BOLD='\033[1m'
-
 SCRIPT_PATH="/usr/local/bin/sync_xui_sqlite.py"
 SERVICE_PATH="/etc/systemd/system/sync_xui.service"
 TUNNEL_SCRIPT_PATH="/usr/local/bin/sync_inbound_tunnel.py"
@@ -88,14 +76,13 @@ TUNNEL_SERVICE_PATH="/etc/systemd/system/sync_inbound_tunnel.service"
 VENV_PATH="/opt/xui_sync_env"
 DB_PATH="/etc/x-ui/x-ui.db"
 GITHUB_RAW="https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main"
-
+EXPIRE_DISABLE_FLAG="/etc/x-ui/expire_disable_enabled"
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
         echo -e "${RED}[ERROR]${NC} Please run as root: sudo winnet-xui"
         exit 1
     fi
 }
-
 get_service_status() {
     local svc="$1"
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -108,7 +95,13 @@ get_service_status() {
         echo -e "${RED}Not Installed${NC}"
     fi
 }
-
+get_expire_disable_status() {
+    if [ -f "$EXPIRE_DISABLE_FLAG" ]; then
+        echo -e "${GREEN}Active${NC}"
+    else
+        echo -e "${RED}Inactive${NC}"
+    fi
+}
 show_menu() {
     clear
     echo -e "${CYAN}${BOLD}"
@@ -118,8 +111,9 @@ show_menu() {
     echo "https://github.com/Win-Net/sync_xui_sqlite"
     echo "========================================"
     echo -e "${NC}"
-    echo -e "  Client Sync:  $(get_service_status sync_xui.service)"
-    echo -e "  Tunnel Sync:  $(get_service_status sync_inbound_tunnel.service)"
+    echo -e "  Client Sync:        $(get_service_status sync_xui.service)"
+    echo -e "  Tunnel Sync:        $(get_service_status sync_inbound_tunnel.service)"
+    echo -e "  Expire & Disable:   $(get_expire_disable_status)"
     echo ""
     echo "  ----- Client Subscription Sync -----"
     echo ""
@@ -133,6 +127,11 @@ show_menu() {
     echo -e "  ${RED}5)${NC} Disable Tunnel Sync"
     echo -e "  ${BLUE}6)${NC} Update Tunnel Sync Script"
     echo ""
+    echo "  ----- Expire & Disable Feature -----"
+    echo ""
+    echo -e "  ${GREEN}9)${NC} Enable Expire & Disable"
+    echo -e "  ${RED}10)${NC} Disable Expire & Disable"
+    echo ""
     echo "  ------------------------------------"
     echo ""
     echo -e "  ${BLUE}7)${NC} Update All"
@@ -142,7 +141,6 @@ show_menu() {
     echo "  ------------------------------------"
     echo ""
 }
-
 enable_client_sync() {
     echo ""
     echo -e "${BLUE}[i]${NC} Enabling client sync service..."
@@ -158,7 +156,6 @@ enable_client_sync() {
     echo ""
     read -p "Press Enter to continue..." _
 }
-
 disable_client_sync() {
     echo ""
     echo -e "${BLUE}[i]${NC} Disabling client sync service..."
@@ -168,7 +165,6 @@ disable_client_sync() {
     echo ""
     read -p "Press Enter to continue..." _
 }
-
 update_client_sync() {
     echo ""
     echo -e "${BLUE}[i]${NC} Updating client sync from GitHub..."
@@ -195,7 +191,6 @@ update_client_sync() {
     echo ""
     read -p "Press Enter to continue..." _
 }
-
 enable_tunnel_sync() {
     echo ""
     if [ ! -f "$TUNNEL_SCRIPT_PATH" ]; then
@@ -236,7 +231,6 @@ enable_tunnel_sync() {
     echo ""
     read -p "Press Enter to continue..." _
 }
-
 disable_tunnel_sync() {
     echo ""
     echo -e "${BLUE}[i]${NC} Disabling tunnel sync service..."
@@ -246,7 +240,6 @@ disable_tunnel_sync() {
     echo ""
     read -p "Press Enter to continue..." _
 }
-
 update_tunnel_sync() {
     echo ""
     echo -e "${BLUE}[i]${NC} Updating tunnel sync from GitHub..."
@@ -272,12 +265,39 @@ update_tunnel_sync() {
     echo ""
     read -p "Press Enter to continue..." _
 }
-
+enable_expire_disable() {
+    echo ""
+    echo -e "${BLUE}[i]${NC} Enabling Expire & Disable feature..."
+    touch "$EXPIRE_DISABLE_FLAG"
+    if [ -f "$EXPIRE_DISABLE_FLAG" ]; then
+        echo -e "${GREEN}[OK]${NC} Expire & Disable feature enabled."
+        echo -e "${BLUE}[i]${NC} From now on, expired clients (by traffic or date) will be"
+        echo -e "       automatically disabled in all inbounds."
+        echo -e "${YELLOW}[!]${NC} Traffic-expired: client disabled + xray core restarted"
+        echo -e "${YELLOW}[!]${NC} Date-expired: client disabled only (no restart needed)"
+        if ! systemctl is-active --quiet sync_xui.service 2>/dev/null; then
+            echo -e "${YELLOW}[!]${NC} Note: Client Sync service is not running."
+            echo -e "       Enable it (option 1) for this feature to work."
+        fi
+    else
+        echo -e "${RED}[ERROR]${NC} Failed to enable Expire & Disable feature."
+    fi
+    echo ""
+    read -p "Press Enter to continue..." _
+}
+disable_expire_disable() {
+    echo ""
+    echo -e "${BLUE}[i]${NC} Disabling Expire & Disable feature..."
+    rm -f "$EXPIRE_DISABLE_FLAG"
+    echo -e "${GREEN}[OK]${NC} Expire & Disable feature disabled."
+    echo -e "${BLUE}[i]${NC} Expired clients will no longer be automatically disabled."
+    echo ""
+    read -p "Press Enter to continue..." _
+}
 update_all() {
     echo ""
     echo -e "${BLUE}[i]${NC} Updating all scripts from GitHub..."
     echo ""
-
     # Update client sync
     systemctl stop sync_xui.service > /dev/null 2>&1
     if curl -fsSL "$GITHUB_RAW/sync_xui_sqlite.py" -o "$SCRIPT_PATH"; then
@@ -289,7 +309,6 @@ update_all() {
     if curl -fsSL "$GITHUB_RAW/sync_xui.service" -o "$SERVICE_PATH"; then
         echo -e "${GREEN}[OK]${NC} Client sync service file updated."
     fi
-
     # Update tunnel sync
     systemctl stop sync_inbound_tunnel.service > /dev/null 2>&1
     if curl -fsSL "$GITHUB_RAW/sync_inbound_tunnel.py" -o "$TUNNEL_SCRIPT_PATH"; then
@@ -301,20 +320,16 @@ update_all() {
     if curl -fsSL "$GITHUB_RAW/sync_inbound_tunnel.service" -o "$TUNNEL_SERVICE_PATH"; then
         echo -e "${GREEN}[OK]${NC} Tunnel sync service file updated."
     fi
-
     # Update dependencies
     "$VENV_PATH/bin/pip" install --upgrade requests > /dev/null 2>&1
     echo -e "${GREEN}[OK]${NC} Dependencies updated."
-
     # Update CLI
     if curl -fsSL "$GITHUB_RAW/install.sh" -o /tmp/winnet_install_tmp.sh; then
         bash /tmp/winnet_install_tmp.sh install-cli-only
         rm -f /tmp/winnet_install_tmp.sh
         echo -e "${GREEN}[OK]${NC} CLI command updated."
     fi
-
     systemctl daemon-reload
-
     # Restart only active services
     if systemctl is-enabled --quiet sync_xui.service 2>/dev/null; then
         systemctl start sync_xui.service > /dev/null 2>&1
@@ -324,13 +339,13 @@ update_all() {
         systemctl start sync_inbound_tunnel.service > /dev/null 2>&1
         echo -e "${GREEN}[OK]${NC} Tunnel sync service restarted."
     fi
-
     echo ""
     echo -e "${GREEN}${BOLD}All updates completed!${NC}"
     echo ""
+    echo -e "${BLUE}[i]${NC} Expire & Disable status: $(if [ -f "$EXPIRE_DISABLE_FLAG" ]; then echo -e "${GREEN}Active${NC}"; else echo -e "${RED}Inactive${NC} (enable via option 9)"; fi)"
+    echo ""
     read -p "Press Enter to continue..." _
 }
-
 uninstall() {
     echo ""
     echo -e "${RED}${BOLD}WARNING: All WinNet XUI Sync files will be removed!${NC}"
@@ -343,41 +358,33 @@ uninstall() {
     fi
     echo ""
     echo -e "${BLUE}[i]${NC} Removing..."
-
     # Stop and remove client sync
     systemctl stop sync_xui.service > /dev/null 2>&1
     systemctl disable sync_xui.service > /dev/null 2>&1
     rm -f "$SERVICE_PATH"
     echo -e "${GREEN}[OK]${NC} Client sync service removed."
-
     # Stop and remove tunnel sync
     systemctl stop sync_inbound_tunnel.service > /dev/null 2>&1
     systemctl disable sync_inbound_tunnel.service > /dev/null 2>&1
     rm -f "$TUNNEL_SERVICE_PATH"
     echo -e "${GREEN}[OK]${NC} Tunnel sync service removed."
-
     systemctl daemon-reload
-
     rm -f "$SCRIPT_PATH"
     echo -e "${GREEN}[OK]${NC} Client sync script removed."
-
     rm -f "$TUNNEL_SCRIPT_PATH"
     echo -e "${GREEN}[OK]${NC} Tunnel sync script removed."
-
     rm -rf "$VENV_PATH"
     echo -e "${GREEN}[OK]${NC} Python venv removed."
-
+    rm -f "$EXPIRE_DISABLE_FLAG"
+    echo -e "${GREEN}[OK]${NC} Expire & Disable flag removed."
     rm -f /usr/local/bin/winnet-xui
     echo -e "${GREEN}[OK]${NC} CLI command removed."
-
     echo ""
     echo -e "${GREEN}${BOLD}Uninstall completed.${NC}"
     echo ""
     exit 0
 }
-
 check_root
-
 while true; do
     show_menu
     read -p "  Select: " choice
@@ -390,6 +397,8 @@ while true; do
         6) update_tunnel_sync ;;
         7) update_all ;;
         8) uninstall ;;
+        9) enable_expire_disable ;;
+        10) disable_expire_disable ;;
         0) echo ""; echo -e "${CYAN}Bye!${NC}"; echo ""; exit 0 ;;
         *) echo -e "${RED}[ERROR]${NC} Invalid option!"; sleep 1 ;;
     esac
@@ -397,12 +406,10 @@ done
 EOFCLI
     chmod +x "$CLI_CMD"
 }
-
 install() {
     print_banner
     echo -e "${MAGENTA}${BOLD}  Installing WinNet XUI Sync${NC}"
     echo ""
-
     if is_installed; then
         print_warn "Already installed. Reinstall?"
         read -p "Continue? (y/n): " confirm
@@ -410,23 +417,18 @@ install() {
             return
         fi
     fi
-
     print_info "Step 1/8: Updating package list..."
     apt update -qq > /dev/null 2>&1
     print_status "Package list updated."
-
     print_info "Step 2/8: Installing python3-venv..."
     apt install -y python3-venv > /dev/null 2>&1
     print_status "python3-venv installed."
-
     print_info "Step 3/8: Creating Python virtual environment..."
     python3 -m venv "$VENV_PATH"
     print_status "Venv created at $VENV_PATH"
-
     print_info "Step 4/8: Installing requests library..."
     "$VENV_PATH/bin/pip" install requests > /dev/null 2>&1
     print_status "requests installed."
-
     print_info "Step 5/8: Downloading client sync script..."
     if curl -fsSL "$GITHUB_RAW/sync_xui_sqlite.py" -o "$SCRIPT_PATH"; then
         chmod 755 "$SCRIPT_PATH"
@@ -435,7 +437,6 @@ install() {
         print_error "Failed to download client sync script!"
         exit 1
     fi
-
     print_info "Step 6/8: Downloading tunnel sync script..."
     if curl -fsSL "$GITHUB_RAW/sync_inbound_tunnel.py" -o "$TUNNEL_SCRIPT_PATH"; then
         chmod 755 "$TUNNEL_SCRIPT_PATH"
@@ -443,7 +444,6 @@ install() {
     else
         print_warn "Failed to download tunnel sync script (optional)."
     fi
-
     print_info "Step 7/8: Downloading systemd services..."
     if curl -fsSL "$GITHUB_RAW/sync_xui.service" -o "$SERVICE_PATH"; then
         print_status "Client sync service file installed."
@@ -456,7 +456,6 @@ install() {
     else
         print_warn "Failed to download tunnel sync service file (optional)."
     fi
-
     print_info "Step 8/8: Running init..."
     if [ -f "$DB_PATH" ]; then
         /usr/bin/env python3 "$SCRIPT_PATH" --db "$DB_PATH" --init --debug
@@ -469,31 +468,25 @@ install() {
         print_warn "Database $DB_PATH not found!"
         print_warn "Make sure 3X-UI is installed, then run init manually."
     fi
-
     systemctl daemon-reload
-
     # Enable only client sync by default
     systemctl enable --now sync_xui.service > /dev/null 2>&1
     systemctl start sync_xui.service > /dev/null 2>&1
-
     install_cli
-
     echo ""
     echo -e "${GREEN}${BOLD}========================================"
     echo "  Installation completed successfully!"
     echo "========================================${NC}"
     echo ""
-    print_info "Client sync: ${GREEN}Enabled${NC}"
-    print_info "Tunnel sync: ${YELLOW}Disabled${NC} (enable via menu)"
-    print_info "To manage, run: ${CYAN}${BOLD}sudo winnet-xui${NC}"
+    print_info "Client sync:      ${GREEN}Enabled${NC}"
+    print_info "Tunnel sync:      ${YELLOW}Disabled${NC} (enable via menu option 4)"
+    print_info "Expire & Disable: ${YELLOW}Disabled${NC} (enable via menu option 9)"
+    print_info "To manage, run:   ${CYAN}${BOLD}sudo winnet-xui${NC}"
     echo ""
 }
-
 check_root
-
 if [ "$1" = "install-cli-only" ]; then
     install_cli
     exit 0
 fi
-
 install
