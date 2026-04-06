@@ -29,9 +29,6 @@ VENV_PATH="/opt/xui_sync_env"
 DB_PATH="/etc/x-ui/x-ui.db"
 CLI_CMD="/usr/local/bin/winnet-xui"
 
-# Enforce Expiry flag file
-ENFORCE_EXPIRY_FLAG="/etc/x-ui/enforce_expiry_enabled"
-
 print_banner() {
     clear
     echo -e "${CYAN}${BOLD}"
@@ -91,7 +88,6 @@ TUNNEL_SERVICE_PATH="/etc/systemd/system/sync_inbound_tunnel.service"
 VENV_PATH="/opt/xui_sync_env"
 DB_PATH="/etc/x-ui/x-ui.db"
 GITHUB_RAW="https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main"
-ENFORCE_EXPIRY_FLAG="/etc/x-ui/enforce_expiry_enabled"
 
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
@@ -113,14 +109,6 @@ get_service_status() {
     fi
 }
 
-get_enforce_expiry_status() {
-    if [ -f "$ENFORCE_EXPIRY_FLAG" ]; then
-        echo -e "${GREEN}Enabled${NC}"
-    else
-        echo -e "${RED}Disabled${NC}"
-    fi
-}
-
 show_menu() {
     clear
     echo -e "${CYAN}${BOLD}"
@@ -130,9 +118,8 @@ show_menu() {
     echo "https://github.com/Win-Net/sync_xui_sqlite"
     echo "========================================"
     echo -e "${NC}"
-    echo -e "  Client Sync:    $(get_service_status sync_xui.service)"
-    echo -e "  Tunnel Sync:    $(get_service_status sync_inbound_tunnel.service)"
-    echo -e "  Enforce Expiry: $(get_enforce_expiry_status)"
+    echo -e "  Client Sync:  $(get_service_status sync_xui.service)"
+    echo -e "  Tunnel Sync:  $(get_service_status sync_inbound_tunnel.service)"
     echo ""
     echo "  ----- Client Subscription Sync -----"
     echo ""
@@ -145,11 +132,6 @@ show_menu() {
     echo -e "  ${GREEN}4)${NC} Enable Tunnel Sync"
     echo -e "  ${RED}5)${NC} Disable Tunnel Sync"
     echo -e "  ${BLUE}6)${NC} Update Tunnel Sync Script"
-    echo ""
-    echo "  ----- Enforce Expiry (Disable on expire + Restart xray) ---"
-    echo ""
-    echo -e "  ${GREEN}9)${NC} Enable Enforce Expiry"
-    echo -e "  ${RED}10)${NC} Disable Enforce Expiry"
     echo ""
     echo "  ------------------------------------"
     echo ""
@@ -291,53 +273,6 @@ update_tunnel_sync() {
     read -p "Press Enter to continue..." _
 }
 
-enable_enforce_expiry() {
-    echo ""
-    echo -e "${BLUE}[i]${NC} Enabling Enforce Expiry..."
-    # اطمینان از اینکه پوشه وجود داره
-    mkdir -p "$(dirname "$ENFORCE_EXPIRY_FLAG")"
-    touch "$ENFORCE_EXPIRY_FLAG"
-    if [ -f "$ENFORCE_EXPIRY_FLAG" ]; then
-        echo -e "${GREEN}[OK]${NC} Enforce Expiry enabled."
-        echo ""
-        echo -e "${BLUE}[i]${NC} From now on, when a client's traffic quota is exhausted:"
-        echo -e "      - Client will be disabled in ALL inbounds (by subscription)"
-        echo -e "      - xray core will be restarted to cut off active connections"
-        echo ""
-        echo -e "${BLUE}[i]${NC} When a client's date expires:"
-        echo -e "      - Client will be disabled in ALL inbounds (by subscription)"
-        echo -e "      - xray core restart is NOT needed (new connections will be rejected)"
-        echo ""
-        # اگه سرویس در حال اجراست restart کن تا تغییر رو بگیره
-        if systemctl is-active --quiet sync_xui.service; then
-            systemctl restart sync_xui.service > /dev/null 2>&1
-            echo -e "${GREEN}[OK]${NC} Client sync service restarted to apply changes."
-        fi
-    else
-        echo -e "${RED}[ERROR]${NC} Failed to enable Enforce Expiry."
-    fi
-    echo ""
-    read -p "Press Enter to continue..." _
-}
-
-disable_enforce_expiry() {
-    echo ""
-    echo -e "${BLUE}[i]${NC} Disabling Enforce Expiry..."
-    rm -f "$ENFORCE_EXPIRY_FLAG"
-    if [ ! -f "$ENFORCE_EXPIRY_FLAG" ]; then
-        echo -e "${GREEN}[OK]${NC} Enforce Expiry disabled."
-        # اگه سرویس در حال اجراست restart کن تا تغییر رو بگیره
-        if systemctl is-active --quiet sync_xui.service; then
-            systemctl restart sync_xui.service > /dev/null 2>&1
-            echo -e "${GREEN}[OK]${NC} Client sync service restarted to apply changes."
-        fi
-    else
-        echo -e "${RED}[ERROR]${NC} Failed to disable Enforce Expiry."
-    fi
-    echo ""
-    read -p "Press Enter to continue..." _
-}
-
 update_all() {
     echo ""
     echo -e "${BLUE}[i]${NC} Updating all scripts from GitHub..."
@@ -393,9 +328,6 @@ update_all() {
     echo ""
     echo -e "${GREEN}${BOLD}All updates completed!${NC}"
     echo ""
-    echo -e "${BLUE}[i]${NC} Enforce Expiry status: $([ -f "$ENFORCE_EXPIRY_FLAG" ] && echo -e "${GREEN}Enabled${NC}" || echo -e "${RED}Disabled${NC}")"
-    echo -e "${BLUE}[i]${NC} Use option 9/10 from menu to enable/disable Enforce Expiry."
-    echo ""
     read -p "Press Enter to continue..." _
 }
 
@@ -435,10 +367,6 @@ uninstall() {
     rm -rf "$VENV_PATH"
     echo -e "${GREEN}[OK]${NC} Python venv removed."
 
-    # Remove enforce expiry flag
-    rm -f "$ENFORCE_EXPIRY_FLAG"
-    echo -e "${GREEN}[OK]${NC} Enforce expiry flag removed."
-
     rm -f /usr/local/bin/winnet-xui
     echo -e "${GREEN}[OK]${NC} CLI command removed."
 
@@ -462,8 +390,6 @@ while true; do
         6) update_tunnel_sync ;;
         7) update_all ;;
         8) uninstall ;;
-        9) enable_enforce_expiry ;;
-        10) disable_enforce_expiry ;;
         0) echo ""; echo -e "${CYAN}Bye!${NC}"; echo ""; exit 0 ;;
         *) echo -e "${RED}[ERROR]${NC} Invalid option!"; sleep 1 ;;
     esac
@@ -557,9 +483,8 @@ install() {
     echo "  Installation completed successfully!"
     echo "========================================${NC}"
     echo ""
-    print_info "Client sync:    ${GREEN}Enabled${NC}"
-    print_info "Tunnel sync:    ${YELLOW}Disabled${NC} (enable via menu)"
-    print_info "Enforce Expiry: ${YELLOW}Disabled${NC} (enable via menu option 9)"
+    print_info "Client sync: ${GREEN}Enabled${NC}"
+    print_info "Tunnel sync: ${YELLOW}Disabled${NC} (enable via menu)"
     print_info "To manage, run: ${CYAN}${BOLD}sudo winnet-xui${NC}"
     echo ""
 }
