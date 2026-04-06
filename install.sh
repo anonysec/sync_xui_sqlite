@@ -25,6 +25,10 @@ SERVICE_PATH="/etc/systemd/system/sync_xui.service"
 TUNNEL_SCRIPT_PATH="/usr/local/bin/sync_inbound_tunnel.py"
 TUNNEL_SERVICE_PATH="/etc/systemd/system/sync_inbound_tunnel.service"
 
+# Enforce Expiry
+ENFORCE_SCRIPT_PATH="/usr/local/bin/enforce_expiry.sh"
+ENFORCE_SERVICE_PATH="/etc/systemd/system/enforce_expiry.service"
+
 VENV_PATH="/opt/xui_sync_env"
 DB_PATH="/etc/x-ui/x-ui.db"
 CLI_CMD="/usr/local/bin/winnet-xui"
@@ -69,6 +73,25 @@ is_installed() {
     [ -f "$SCRIPT_PATH" ] && [ -f "$SERVICE_PATH" ]
 }
 
+write_enforce_service() {
+    cat > "$ENFORCE_SERVICE_PATH" << 'SVEOF'
+[Unit]
+Description=WinNet - Enforce Expiry (disable expired clients & restart xray)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /usr/local/bin/enforce_expiry.sh /etc/x-ui/x-ui.db 60
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SVEOF
+}
+
 install_cli() {
     cat > "$CLI_CMD" << 'EOFCLI'
 #!/bin/bash
@@ -85,6 +108,8 @@ SCRIPT_PATH="/usr/local/bin/sync_xui_sqlite.py"
 SERVICE_PATH="/etc/systemd/system/sync_xui.service"
 TUNNEL_SCRIPT_PATH="/usr/local/bin/sync_inbound_tunnel.py"
 TUNNEL_SERVICE_PATH="/etc/systemd/system/sync_inbound_tunnel.service"
+ENFORCE_SCRIPT_PATH="/usr/local/bin/enforce_expiry.sh"
+ENFORCE_SERVICE_PATH="/etc/systemd/system/enforce_expiry.service"
 VENV_PATH="/opt/xui_sync_env"
 DB_PATH="/etc/x-ui/x-ui.db"
 GITHUB_RAW="https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main"
@@ -109,6 +134,25 @@ get_service_status() {
     fi
 }
 
+write_enforce_service() {
+    cat > "$ENFORCE_SERVICE_PATH" << 'SVEOF'
+[Unit]
+Description=WinNet - Enforce Expiry (disable expired clients & restart xray)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /usr/local/bin/enforce_expiry.sh /etc/x-ui/x-ui.db 60
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SVEOF
+}
+
 show_menu() {
     clear
     echo -e "${CYAN}${BOLD}"
@@ -118,8 +162,9 @@ show_menu() {
     echo "https://github.com/Win-Net/sync_xui_sqlite"
     echo "========================================"
     echo -e "${NC}"
-    echo -e "  Client Sync:  $(get_service_status sync_xui.service)"
-    echo -e "  Tunnel Sync:  $(get_service_status sync_inbound_tunnel.service)"
+    echo -e "  Client Sync:    $(get_service_status sync_xui.service)"
+    echo -e "  Tunnel Sync:    $(get_service_status sync_inbound_tunnel.service)"
+    echo -e "  Enforce Expiry: $(get_service_status enforce_expiry.service)"
     echo ""
     echo "  ----- Client Subscription Sync -----"
     echo ""
@@ -133,11 +178,17 @@ show_menu() {
     echo -e "  ${RED}5)${NC} Disable Tunnel Sync"
     echo -e "  ${BLUE}6)${NC} Update Tunnel Sync Script"
     echo ""
+    echo "  ----- Enforce Expiry ---------------"
+    echo ""
+    echo -e "  ${GREEN}7)${NC} Enable Enforce Expiry"
+    echo -e "  ${RED}8)${NC} Disable Enforce Expiry"
+    echo -e "  ${BLUE}9)${NC} Update Enforce Expiry Script"
+    echo ""
     echo "  ------------------------------------"
     echo ""
-    echo -e "  ${BLUE}7)${NC} Update All"
-    echo -e "  ${YELLOW}8)${NC} Uninstall Everything"
-    echo -e "  ${CYAN}0)${NC} Exit"
+    echo -e "  ${BLUE}10)${NC} Update All"
+    echo -e "  ${YELLOW}11)${NC} Uninstall Everything"
+    echo -e "  ${CYAN}0)${NC}  Exit"
     echo ""
     echo "  ------------------------------------"
     echo ""
@@ -218,7 +269,6 @@ enable_tunnel_sync() {
             return
         fi
     fi
-    # Run init
     if [ -f "$DB_PATH" ]; then
         echo -e "${BLUE}[i]${NC} Initializing tunnel sync..."
         /usr/bin/env python3 "$TUNNEL_SCRIPT_PATH" --db "$DB_PATH" --init --debug
@@ -273,6 +323,93 @@ update_tunnel_sync() {
     read -p "Press Enter to continue..." _
 }
 
+enable_enforce_expiry() {
+    echo ""
+    echo -e "${BLUE}[i]${NC} Enabling Enforce Expiry service..."
+
+    # اگه اسکریپت وجود نداره، دانلود کن
+    if [ ! -f "$ENFORCE_SCRIPT_PATH" ]; then
+        echo -e "${BLUE}[i]${NC} Enforce expiry script not found. Downloading..."
+        if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
+            chmod 755 "$ENFORCE_SCRIPT_PATH"
+            echo -e "${GREEN}[OK]${NC} Enforce expiry script downloaded."
+        else
+            echo -e "${RED}[ERROR]${NC} Failed to download enforce expiry script."
+            read -p "Press Enter to continue..." _
+            return
+        fi
+    fi
+
+    # چک کردن sqlite3
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo -e "${BLUE}[i]${NC} Installing sqlite3..."
+        apt install -y sqlite3 > /dev/null 2>&1
+        if command -v sqlite3 >/dev/null 2>&1; then
+            echo -e "${GREEN}[OK]${NC} sqlite3 installed."
+        else
+            echo -e "${RED}[ERROR]${NC} Failed to install sqlite3."
+            read -p "Press Enter to continue..." _
+            return
+        fi
+    fi
+
+    # ساخت service file
+    write_enforce_service
+    echo -e "${GREEN}[OK]${NC} Enforce expiry service file created."
+
+    systemctl daemon-reload
+    systemctl enable --now enforce_expiry.service > /dev/null 2>&1
+    systemctl start enforce_expiry.service > /dev/null 2>&1
+
+    if systemctl is-active --quiet enforce_expiry.service; then
+        echo -e "${GREEN}[OK]${NC} Enforce expiry service enabled and started."
+        echo ""
+        echo -e "${CYAN}[i]${NC} Behavior:"
+        echo -e "     Traffic expired  → disable client in ALL inbounds + restart xray"
+        echo -e "     Date expired     → disable client in ALL inbounds (no xray restart)"
+    else
+        echo -e "${RED}[ERROR]${NC} Failed to start enforce expiry service."
+        echo -e "${YELLOW}[!]${NC} Check logs: sudo journalctl -u enforce_expiry.service -f"
+    fi
+    echo ""
+    read -p "Press Enter to continue..." _
+}
+
+disable_enforce_expiry() {
+    echo ""
+    echo -e "${BLUE}[i]${NC} Disabling Enforce Expiry service..."
+    systemctl disable --now enforce_expiry.service > /dev/null 2>&1
+    systemctl stop enforce_expiry.service > /dev/null 2>&1
+    echo -e "${GREEN}[OK]${NC} Enforce expiry service disabled."
+    echo ""
+    read -p "Press Enter to continue..." _
+}
+
+update_enforce_expiry() {
+    echo ""
+    echo -e "${BLUE}[i]${NC} Updating enforce expiry from GitHub..."
+    systemctl stop enforce_expiry.service > /dev/null 2>&1
+    if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
+        chmod 755 "$ENFORCE_SCRIPT_PATH"
+        echo -e "${GREEN}[OK]${NC} Enforce expiry script updated."
+    else
+        echo -e "${RED}[ERROR]${NC} Failed to download enforce expiry script."
+        read -p "Press Enter to continue..." _
+        return
+    fi
+    # بازنویسی service file
+    write_enforce_service
+    systemctl daemon-reload
+    if systemctl is-enabled --quiet enforce_expiry.service 2>/dev/null; then
+        systemctl start enforce_expiry.service > /dev/null 2>&1
+        echo -e "${GREEN}[OK]${NC} Enforce expiry service restarted."
+    fi
+    echo ""
+    echo -e "${GREEN}${BOLD}Enforce expiry update completed!${NC}"
+    echo ""
+    read -p "Press Enter to continue..." _
+}
+
 update_all() {
     echo ""
     echo -e "${BLUE}[i]${NC} Updating all scripts from GitHub..."
@@ -302,6 +439,17 @@ update_all() {
         echo -e "${GREEN}[OK]${NC} Tunnel sync service file updated."
     fi
 
+    # Update enforce expiry
+    systemctl stop enforce_expiry.service > /dev/null 2>&1
+    if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
+        chmod 755 "$ENFORCE_SCRIPT_PATH"
+        echo -e "${GREEN}[OK]${NC} Enforce expiry script updated."
+    else
+        echo -e "${YELLOW}[!]${NC} Failed to download enforce expiry script (may not exist yet)."
+    fi
+    write_enforce_service
+    echo -e "${GREEN}[OK]${NC} Enforce expiry service file updated."
+
     # Update dependencies
     "$VENV_PATH/bin/pip" install --upgrade requests > /dev/null 2>&1
     echo -e "${GREEN}[OK]${NC} Dependencies updated."
@@ -315,7 +463,7 @@ update_all() {
 
     systemctl daemon-reload
 
-    # Restart only active services
+    # Restart only active/enabled services
     if systemctl is-enabled --quiet sync_xui.service 2>/dev/null; then
         systemctl start sync_xui.service > /dev/null 2>&1
         echo -e "${GREEN}[OK]${NC} Client sync service restarted."
@@ -323,6 +471,10 @@ update_all() {
     if systemctl is-enabled --quiet sync_inbound_tunnel.service 2>/dev/null; then
         systemctl start sync_inbound_tunnel.service > /dev/null 2>&1
         echo -e "${GREEN}[OK]${NC} Tunnel sync service restarted."
+    fi
+    if systemctl is-enabled --quiet enforce_expiry.service 2>/dev/null; then
+        systemctl start enforce_expiry.service > /dev/null 2>&1
+        echo -e "${GREEN}[OK]${NC} Enforce expiry service restarted."
     fi
 
     echo ""
@@ -356,6 +508,12 @@ uninstall() {
     rm -f "$TUNNEL_SERVICE_PATH"
     echo -e "${GREEN}[OK]${NC} Tunnel sync service removed."
 
+    # Stop and remove enforce expiry
+    systemctl stop enforce_expiry.service > /dev/null 2>&1
+    systemctl disable enforce_expiry.service > /dev/null 2>&1
+    rm -f "$ENFORCE_SERVICE_PATH"
+    echo -e "${GREEN}[OK]${NC} Enforce expiry service removed."
+
     systemctl daemon-reload
 
     rm -f "$SCRIPT_PATH"
@@ -363,6 +521,9 @@ uninstall() {
 
     rm -f "$TUNNEL_SCRIPT_PATH"
     echo -e "${GREEN}[OK]${NC} Tunnel sync script removed."
+
+    rm -f "$ENFORCE_SCRIPT_PATH"
+    echo -e "${GREEN}[OK]${NC} Enforce expiry script removed."
 
     rm -rf "$VENV_PATH"
     echo -e "${GREEN}[OK]${NC} Python venv removed."
@@ -382,16 +543,19 @@ while true; do
     show_menu
     read -p "  Select: " choice
     case $choice in
-        1) enable_client_sync ;;
-        2) disable_client_sync ;;
-        3) update_client_sync ;;
-        4) enable_tunnel_sync ;;
-        5) disable_tunnel_sync ;;
-        6) update_tunnel_sync ;;
-        7) update_all ;;
-        8) uninstall ;;
-        0) echo ""; echo -e "${CYAN}Bye!${NC}"; echo ""; exit 0 ;;
-        *) echo -e "${RED}[ERROR]${NC} Invalid option!"; sleep 1 ;;
+        1)  enable_client_sync ;;
+        2)  disable_client_sync ;;
+        3)  update_client_sync ;;
+        4)  enable_tunnel_sync ;;
+        5)  disable_tunnel_sync ;;
+        6)  update_tunnel_sync ;;
+        7)  enable_enforce_expiry ;;
+        8)  disable_enforce_expiry ;;
+        9)  update_enforce_expiry ;;
+        10) update_all ;;
+        11) uninstall ;;
+        0)  echo ""; echo -e "${CYAN}Bye!${NC}"; echo ""; exit 0 ;;
+        *)  echo -e "${RED}[ERROR]${NC} Invalid option!"; sleep 1 ;;
     esac
 done
 EOFCLI
@@ -411,23 +575,23 @@ install() {
         fi
     fi
 
-    print_info "Step 1/8: Updating package list..."
+    print_info "Step 1/9: Updating package list..."
     apt update -qq > /dev/null 2>&1
     print_status "Package list updated."
 
-    print_info "Step 2/8: Installing python3-venv..."
-    apt install -y python3-venv > /dev/null 2>&1
-    print_status "python3-venv installed."
+    print_info "Step 2/9: Installing python3-venv and sqlite3..."
+    apt install -y python3-venv sqlite3 > /dev/null 2>&1
+    print_status "python3-venv and sqlite3 installed."
 
-    print_info "Step 3/8: Creating Python virtual environment..."
+    print_info "Step 3/9: Creating Python virtual environment..."
     python3 -m venv "$VENV_PATH"
     print_status "Venv created at $VENV_PATH"
 
-    print_info "Step 4/8: Installing requests library..."
+    print_info "Step 4/9: Installing requests library..."
     "$VENV_PATH/bin/pip" install requests > /dev/null 2>&1
     print_status "requests installed."
 
-    print_info "Step 5/8: Downloading client sync script..."
+    print_info "Step 5/9: Downloading client sync script..."
     if curl -fsSL "$GITHUB_RAW/sync_xui_sqlite.py" -o "$SCRIPT_PATH"; then
         chmod 755 "$SCRIPT_PATH"
         print_status "Client sync script saved to $SCRIPT_PATH"
@@ -436,7 +600,7 @@ install() {
         exit 1
     fi
 
-    print_info "Step 6/8: Downloading tunnel sync script..."
+    print_info "Step 6/9: Downloading tunnel sync script..."
     if curl -fsSL "$GITHUB_RAW/sync_inbound_tunnel.py" -o "$TUNNEL_SCRIPT_PATH"; then
         chmod 755 "$TUNNEL_SCRIPT_PATH"
         print_status "Tunnel sync script saved to $TUNNEL_SCRIPT_PATH"
@@ -444,7 +608,15 @@ install() {
         print_warn "Failed to download tunnel sync script (optional)."
     fi
 
-    print_info "Step 7/8: Downloading systemd services..."
+    print_info "Step 7/9: Downloading enforce expiry script..."
+    if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
+        chmod 755 "$ENFORCE_SCRIPT_PATH"
+        print_status "Enforce expiry script saved to $ENFORCE_SCRIPT_PATH"
+    else
+        print_warn "Failed to download enforce expiry script (optional)."
+    fi
+
+    print_info "Step 8/9: Downloading systemd services..."
     if curl -fsSL "$GITHUB_RAW/sync_xui.service" -o "$SERVICE_PATH"; then
         print_status "Client sync service file installed."
     else
@@ -456,8 +628,11 @@ install() {
     else
         print_warn "Failed to download tunnel sync service file (optional)."
     fi
+    # Enforce expiry service رو مستقیم می‌سازیم (نیازی به دانلود نیست)
+    write_enforce_service
+    print_status "Enforce expiry service file created."
 
-    print_info "Step 8/8: Running init..."
+    print_info "Step 9/9: Running init..."
     if [ -f "$DB_PATH" ]; then
         /usr/bin/env python3 "$SCRIPT_PATH" --db "$DB_PATH" --init --debug
         print_status "Client sync init completed."
@@ -483,8 +658,9 @@ install() {
     echo "  Installation completed successfully!"
     echo "========================================${NC}"
     echo ""
-    print_info "Client sync: ${GREEN}Enabled${NC}"
-    print_info "Tunnel sync: ${YELLOW}Disabled${NC} (enable via menu)"
+    print_info "Client sync:    ${GREEN}Enabled${NC}"
+    print_info "Tunnel sync:    ${YELLOW}Disabled${NC} (enable via menu)"
+    print_info "Enforce expiry: ${YELLOW}Disabled${NC} (enable via menu)"
     print_info "To manage, run: ${CYAN}${BOLD}sudo winnet-xui${NC}"
     echo ""
 }
