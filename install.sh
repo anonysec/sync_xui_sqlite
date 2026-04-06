@@ -115,25 +115,6 @@ get_service_status() {
     fi
 }
 
-install_enforce_service() {
-    if [ ! -f "$ENFORCE_SERVICE_PATH" ]; then
-        cat > "$ENFORCE_SERVICE_PATH" << 'EOFSERVICE'
-[Unit]
-Description=WinNet Enforce Expiry
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/bin/bash /usr/local/bin/enforce_expiry.sh
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOFSERVICE
-    fi
-}
-
 show_menu() {
     clear
     echo -e "${CYAN}${BOLD}"
@@ -305,7 +286,6 @@ update_tunnel_sync() {
 
 enable_enforce_expiry() {
     echo ""
-    # Download script if not present
     if [ ! -f "$ENFORCE_SCRIPT_PATH" ]; then
         echo -e "${BLUE}[i]${NC} Enforce expiry not installed. Downloading..."
         if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
@@ -317,14 +297,16 @@ enable_enforce_expiry() {
             return
         fi
     fi
-    # Install sqlite3 if needed
-    if ! command -v sqlite3 &>/dev/null; then
-        echo -e "${BLUE}[i]${NC} Installing sqlite3..."
-        apt install -y sqlite3 > /dev/null 2>&1
-        echo -e "${GREEN}[OK]${NC} sqlite3 installed."
+    if [ ! -f "$ENFORCE_SERVICE_PATH" ]; then
+        if curl -fsSL "$GITHUB_RAW/enforce_expiry.service" -o "$ENFORCE_SERVICE_PATH"; then
+            chmod 644 "$ENFORCE_SERVICE_PATH"
+            echo -e "${GREEN}[OK]${NC} Enforce expiry service file downloaded."
+        else
+            echo -e "${RED}[ERROR]${NC} Failed to download enforce expiry service file."
+            read -p "Press Enter to continue..." _
+            return
+        fi
     fi
-    # Create service file if not present
-    install_enforce_service
     systemctl daemon-reload
     systemctl enable --now enforce_expiry.service > /dev/null 2>&1
     systemctl start enforce_expiry.service > /dev/null 2>&1
@@ -385,12 +367,11 @@ update_all() {
     else
         echo -e "${YELLOW}[!]${NC} Failed to download enforce expiry script."
     fi
-    # Create service file if missing (migration for old installs)
-    install_enforce_service
-    # Install sqlite3 if missing
-    if ! command -v sqlite3 &>/dev/null; then
-        apt install -y sqlite3 > /dev/null 2>&1
-        echo -e "${GREEN}[OK]${NC} sqlite3 installed."
+    if curl -fsSL "$GITHUB_RAW/enforce_expiry.service" -o "$ENFORCE_SERVICE_PATH"; then
+        chmod 644 "$ENFORCE_SERVICE_PATH"
+        echo -e "${GREEN}[OK]${NC} Enforce expiry service file updated."
+    else
+        echo -e "${YELLOW}[!]${NC} Failed to download enforce expiry service file."
     fi
 
     # Update dependencies
@@ -502,25 +483,6 @@ EOFCLI
     chmod +x "$CLI_CMD"
 }
 
-install_enforce_service() {
-    if [ ! -f "$ENFORCE_SERVICE_PATH" ]; then
-        cat > "$ENFORCE_SERVICE_PATH" << 'EOFSERVICE'
-[Unit]
-Description=WinNet Enforce Expiry
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/bin/bash /usr/local/bin/enforce_expiry.sh
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOFSERVICE
-    fi
-}
-
 install() {
     print_banner
     echo -e "${MAGENTA}${BOLD}  Installing WinNet XUI Sync${NC}"
@@ -534,23 +496,23 @@ install() {
         fi
     fi
 
-    print_info "Step 1/9: Updating package list..."
+    print_info "Step 1/8: Updating package list..."
     apt update -qq > /dev/null 2>&1
     print_status "Package list updated."
 
-    print_info "Step 2/9: Installing python3-venv and sqlite3..."
-    apt install -y python3-venv sqlite3 > /dev/null 2>&1
-    print_status "python3-venv and sqlite3 installed."
+    print_info "Step 2/8: Installing python3-venv..."
+    apt install -y python3-venv > /dev/null 2>&1
+    print_status "python3-venv installed."
 
-    print_info "Step 3/9: Creating Python virtual environment..."
+    print_info "Step 3/8: Creating Python virtual environment..."
     python3 -m venv "$VENV_PATH"
     print_status "Venv created at $VENV_PATH"
 
-    print_info "Step 4/9: Installing requests library..."
+    print_info "Step 4/8: Installing requests library..."
     "$VENV_PATH/bin/pip" install requests > /dev/null 2>&1
     print_status "requests installed."
 
-    print_info "Step 5/9: Downloading client sync script..."
+    print_info "Step 5/8: Downloading client sync script..."
     if curl -fsSL "$GITHUB_RAW/sync_xui_sqlite.py" -o "$SCRIPT_PATH"; then
         chmod 755 "$SCRIPT_PATH"
         print_status "Client sync script saved to $SCRIPT_PATH"
@@ -559,7 +521,7 @@ install() {
         exit 1
     fi
 
-    print_info "Step 6/9: Downloading tunnel sync script..."
+    print_info "Step 6/8: Downloading tunnel sync script..."
     if curl -fsSL "$GITHUB_RAW/sync_inbound_tunnel.py" -o "$TUNNEL_SCRIPT_PATH"; then
         chmod 755 "$TUNNEL_SCRIPT_PATH"
         print_status "Tunnel sync script saved to $TUNNEL_SCRIPT_PATH"
@@ -567,7 +529,7 @@ install() {
         print_warn "Failed to download tunnel sync script (optional)."
     fi
 
-    print_info "Step 7/9: Downloading enforce expiry script..."
+    print_info "Step 7/8: Downloading enforce expiry script..."
     if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
         chmod 755 "$ENFORCE_SCRIPT_PATH"
         print_status "Enforce expiry script saved to $ENFORCE_SCRIPT_PATH"
@@ -575,7 +537,7 @@ install() {
         print_warn "Failed to download enforce expiry script (optional)."
     fi
 
-    print_info "Step 8/9: Downloading systemd services..."
+    print_info "Step 8/8: Downloading systemd services..."
     if curl -fsSL "$GITHUB_RAW/sync_xui.service" -o "$SERVICE_PATH"; then
         print_status "Client sync service file installed."
     else
@@ -587,10 +549,14 @@ install() {
     else
         print_warn "Failed to download tunnel sync service file (optional)."
     fi
-    install_enforce_service
-    print_status "Enforce expiry service file created."
+    if curl -fsSL "$GITHUB_RAW/enforce_expiry.service" -o "$ENFORCE_SERVICE_PATH"; then
+        chmod 644 "$ENFORCE_SERVICE_PATH"
+        print_status "Enforce expiry service file installed."
+    else
+        print_warn "Failed to download enforce expiry service file (optional)."
+    fi
 
-    print_info "Step 9/9: Running init..."
+    print_info "Running init..."
     if [ -f "$DB_PATH" ]; then
         /usr/bin/env python3 "$SCRIPT_PATH" --db "$DB_PATH" --init --debug
         print_status "Client sync init completed."
