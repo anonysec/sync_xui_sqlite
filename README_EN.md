@@ -1,5 +1,4 @@
-[English](/README_EN.md) | [فارسی](/README.md)
-
+[English](/README_EN.md) | [فارسی](/README.md) | [آموزش نصب دستی](/Manual_Install.md)
 # 🏆 WinNet
 **WinNet** - Subscription-based synchronization script
 With this script, you can easily create multi-inbound accounts with all versions and forks of X-UI
