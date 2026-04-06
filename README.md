@@ -1,4 +1,4 @@
-[English](/README_EN.md) | [فارسی](/README.md) | | [آموزش نصب دستی](/Manual_Install.md)
+[English](/README_EN.md) | [فارسی](/README.md) | [آموزش نصب دستی](/Manual_Install.md)
 
 # 🏆وین نت | WinNet #
 **وین نت** - اسکریپت یکسان سازی بر طبق سابسکریپشن <br>
