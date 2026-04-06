@@ -54,20 +54,7 @@ cd sync_xui_sqlite-main
 ## مرحله ۵ — انتقال فایل‌ها به محل مورد نظر
 
 ```bash
-cp sync_xui_sqlite /usr/local/bin/sync_xui_sqlite.py
-cp sync_inbound_tunnel /usr/local/bin/sync_inbound_tunnel.py
-cp enforce_expiry.sh /usr/local/bin/enforce_expiry.sh
-cp enforce_expiry.service /etc/systemd/system/enforce_expiry.service
-cp sync_xui.service /etc/systemd/system/sync_xui.service
-cp sync_inbound_tunnel.service /etc/systemd/system/sync_inbound_tunnel.service
-```
-```bash
-chmod 755 /usr/local/bin/sync_xui_sqlite.py
-chmod 755 /usr/local/bin/sync_inbound_tunnel.py
-chmod 755 /usr/local/bin/enforce_expiry.sh
-chmod 644 /etc/systemd/system/enforce_expiry.service
-chmod 644 /etc/systemd/system/sync_xui.service
-chmod 644 /etc/systemd/system/sync_inbound_tunnel.service
+mv sync_xui_sqlite.py /usr/local/bin/sync_xui_sqlite.py && mv sync_inbound_tunnel.py /usr/local/bin/sync_inbound_tunnel.py && mv enforce_expiry.sh /usr/local/bin/enforce_expiry.sh && mv enforce_expiry.service /etc/systemd/system/enforce_expiry.service && mv sync_xui.service /etc/systemd/system/sync_xui.service && mv sync_inbound_tunnel.service /etc/systemd/system/sync_inbound_tunnel.service && chmod 755 /usr/local/bin/sync_xui_sqlite.py /usr/local/bin/sync_inbound_tunnel.py /usr/local/bin/enforce_expiry.sh && chmod 644 /etc/systemd/system/enforce_expiry.service /etc/systemd/system/sync_xui.service /etc/systemd/system/sync_inbound_tunnel.service
 ```
 
 ---
