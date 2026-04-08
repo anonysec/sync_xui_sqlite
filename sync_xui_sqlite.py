@@ -338,6 +338,7 @@ def sync_once(conn, apply=False, debug=False):
         cur.execute("UPDATE inbounds SET settings=? WHERE id=?", (jdump(s), iid))
 
     ct_writes=0; set_writes=0
+    need_xray_restart = False
     for p in plans:
         iid=p["iid"]; email=p["email"]; ch=p["changes"]; ref=p["ref_sig"]; reset_flag=p.get("reset_flag", False)
 
@@ -407,6 +408,10 @@ def sync_once(conn, apply=False, debug=False):
             new_enable = en0
             if "enable" in ch:
                 new_enable = int(ch["enable"][1])
+                # اگر کاربر تازه disable شد (از 1 به 0)، xray باید ریستارت بشه
+                if en0 == 1 and new_enable == 0:
+                    need_xray_restart = True
+                    print(f"[XRAY] Client '{email}' expired → xray will restart.")
 
             if rid:
                 cur.execute("UPDATE client_traffics SET up=?,down=?,total=?,expiry_time=?,enable=?,reset=0 WHERE id=?",
@@ -475,6 +480,11 @@ def sync_once(conn, apply=False, debug=False):
 
     conn.commit()
     print(f"[APPLIED] settings_updated={set_writes}, traffic_rows_written={ct_writes}")
+
+    # ریستارت xray در صورت منقضی شدن کاربر
+    if need_xray_restart:
+        subprocess.run(["x-ui", "restart"], check=False)
+        print("[XRAY] x-ui restart executed.")
 
     return len(plans)
 
