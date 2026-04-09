@@ -32,7 +32,7 @@ Smart and automatic installation of all prerequisites and complete script config
 ## Quick installation instructions :
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main/install.sh)"
+apt install curl -y && bash <(curl -s https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main/install.sh --ipv4)
 ```
 
 # Command Line Interface (CLI)
