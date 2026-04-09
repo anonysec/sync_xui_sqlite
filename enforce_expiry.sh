@@ -38,9 +38,10 @@ detect_db() {
   for p in "${paths[@]}"; do
     [[ -f "$p" ]] && { echo "$p"; return 0; }
   done
+  local svcs=(x-ui.service 3x-ui.service)
   local svc
-  for svc in x-ui.service 3x-ui.service; do
-    if systemctl cat "$svc" >/dev/null 2>&1; do
+  for svc in "${svcs[@]}"; do
+    if systemctl cat "$svc" >/dev/null 2>&1; then
       local content wd
       content="$(systemctl cat "$svc" 2>/dev/null || true)"
       local direct_db
@@ -49,7 +50,7 @@ detect_db() {
       wd="$(printf '%s\n' "$content" | sed -n 's/^WorkingDirectory=//p' | head -1 || true)"
       if [[ -n "$wd" ]]; then
         local m
-        for m in "$wd/x-ui.db" "$wd/xui.db"; do
+        for m in "$wd/x-ui.db" "$wd/xui.db" "$wd/db/x-ui.db" "$wd/db/xui.db"; do
           [[ -f "$m" ]] && { echo "$m"; return 0; }
         done
       fi
@@ -61,18 +62,20 @@ detect_db() {
 
 detect_restart_targets() {
   local targets=()
-  systemctl cat xray.service   >/dev/null 2>&1 && targets+=("xray.service")
-  systemctl cat x-ui.service   >/dev/null 2>&1 && targets+=("x-ui.service")
-  systemctl cat 3x-ui.service  >/dev/null 2>&1 && targets+=("3x-ui.service")
+  systemctl cat xray.service >/dev/null 2>&1 && targets+=("xray.service")
+  systemctl cat x-ui.service >/dev/null 2>&1 && targets+=("x-ui.service")
+  systemctl cat 3x-ui.service >/dev/null 2>&1 && targets+=("3x-ui.service")
   if [[ ${#targets[@]} -eq 0 ]]; then
     echo "x-ui.service"
   else
-    printf '%s\n' "${targets[@]}"
+    printf '%s\n' "${targets[@]}" | tr '\n' ' ' | sed 's/ $//'
   fi
 }
 
 cmd_install() {
   require_root
+  local interval="${1:-10}"
+  local cooldown="${2:-120}"
 
   local PYTHON3_BIN
   PYTHON3_BIN="$(detect_python3 || true)"
@@ -84,12 +87,13 @@ cmd_install() {
   [[ -z "$DB_PATH" ]] && { echo "[ERROR] x-ui database not found"; exit 1; }
   echo "[INFO] database: $DB_PATH"
 
-  local CHECK_INTERVAL="${1:-10}"
-  local RESTART_COOLDOWN="${2:-120}"
+  local RESTART_TARGETS
+  RESTART_TARGETS="$(detect_restart_targets)"
+  echo "[INFO] restart targets: $RESTART_TARGETS"
 
   mkdir -p "$BASE_DIR"
 
-  cat > "$PY_FILE" << 'PYEOF'
+  cat > "$PY_FILE" <<'PYEOF'
 #!/usr/bin/env python3
 import argparse
 import json
@@ -112,7 +116,7 @@ signal.signal(signal.SIGTERM, handle_signal)
 signal.signal(signal.SIGINT, handle_signal)
 
 def parse_args():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="x-ui quota restart monitor")
     parser.add_argument("--db-path", required=True)
     parser.add_argument("--state-file", required=True)
     parser.add_argument("--check-interval", type=int, default=10)
@@ -130,7 +134,7 @@ def setup_logger():
     )
     return logging.getLogger("xui_quota_restart")
 
-def load_state(state_file: str) -> dict:
+def load_state(state_file):
     if not os.path.exists(state_file):
         return {"last_restart_ts": 0, "last_depleted": []}
     try:
@@ -139,14 +143,14 @@ def load_state(state_file: str) -> dict:
     except Exception:
         return {"last_restart_ts": 0, "last_depleted": []}
 
-def save_state(state_file: str, state: dict) -> None:
+def save_state(state_file, state):
     os.makedirs(os.path.dirname(state_file), exist_ok=True)
     tmp = state_file + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, separators=(",", ":"))
     os.replace(tmp, state_file)
 
-def get_depleted_users(db_path: str, sqlite_timeout: int) -> List[str]:
+def get_depleted_users(db_path, sqlite_timeout):
     if not os.path.isfile(db_path):
         raise FileNotFoundError(f"Database not found: {db_path}")
     db_uri = f"file:{db_path}?mode=ro"
@@ -158,8 +162,7 @@ def get_depleted_users(db_path: str, sqlite_timeout: int) -> List[str]:
         missing = required - cols
         if missing:
             raise RuntimeError(f"Missing columns: {sorted(missing)}")
-        rows = conn.execute(
-            """
+        rows = conn.execute("""
             SELECT DISTINCT TRIM(email) AS email
             FROM client_traffics
             WHERE total > 0
@@ -167,29 +170,25 @@ def get_depleted_users(db_path: str, sqlite_timeout: int) -> List[str]:
               AND email IS NOT NULL
               AND TRIM(email) <> ''
             ORDER BY email
-            """
-        ).fetchall()
+        """).fetchall()
         return [row["email"] for row in rows]
     finally:
         conn.close()
 
-def restart_service(restart_targets: List[str], dry_run: bool, logger) -> str:
+def restart_service(restart_targets, dry_run, logger):
     if dry_run:
         logger.warning("DRY_RUN enabled, restart skipped")
         return "dry-run"
     for unit in restart_targets:
         exists = subprocess.run(
             ["systemctl", "status", unit],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         if exists.returncode not in (0, 3, 4):
             continue
         result = subprocess.run(
             ["systemctl", "restart", unit],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         if result.returncode == 0:
             logger.warning("Restart executed: %s", unit)
@@ -254,14 +253,12 @@ PYEOF
   chmod +x "$PY_FILE"
   echo "[INFO] monitor.py created: $PY_FILE"
 
-  local EXEC_START="$PYTHON3_BIN $PY_FILE --db-path $DB_PATH --state-file $STATE_FILE --check-interval $CHECK_INTERVAL --restart-cooldown $RESTART_COOLDOWN --sqlite-timeout 10"
+  local EXEC_START="$PYTHON3_BIN $PY_FILE --db-path $DB_PATH --state-file $STATE_FILE --check-interval $interval --restart-cooldown $cooldown --sqlite-timeout 10"
+  for unit in $RESTART_TARGETS; do
+    EXEC_START="$EXEC_START --restart-target $unit"
+  done
 
-  local target
-  while IFS= read -r target; do
-    [[ -n "$target" ]] && EXEC_START="$EXEC_START --restart-target $target"
-  done <<< "$(detect_restart_targets)"
-
-  cat > "$SERVICE_FILE" << EOF
+  cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=XUI Enforce Expiry
 After=network-online.target
@@ -287,12 +284,8 @@ EOF
   systemctl daemon-reload
   systemctl enable "${APP}.service"
   systemctl restart "${APP}.service"
-
-  if systemctl is-active --quiet "${APP}.service"; then
-    echo "[OK] enforce expiry service started"
-  else
-    echo "[ERROR] service failed to start — check: journalctl -u ${APP}.service -f"
-  fi
+  echo "[INFO] installed and started"
+  echo "[INFO] logs: journalctl -u ${APP}.service -f"
 }
 
 cmd_uninstall() {
@@ -302,7 +295,7 @@ cmd_uninstall() {
   rm -f "$SERVICE_FILE"
   systemctl daemon-reload
   rm -rf "$BASE_DIR"
-  echo "[OK] enforce expiry removed"
+  echo "[INFO] uninstalled"
 }
 
 case "${1:-}" in
