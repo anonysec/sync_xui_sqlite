@@ -190,9 +190,7 @@ def get_sub_enable_state(conn) -> dict[str, bool]:
 def check_expired_and_restart(conn):
     """
     وضعیت فعلی subId ها رو با وضعیت قبلی مقایسه می‌کنه.
-    فقط وقتی تغییر وضعیت واقعی رخ داده (فعال→منقضی یا منقضی→فعال):
-      1. enable رو برای همه inbound های اون subId یکسان می‌کنه
-      2. هسته رو ریستارت می‌کنه
+    فقط وقتی تغییر وضعیت واقعی رخ داده (فعال→منقضی یا منقضی→فعال) ریستارت می‌کنه.
     کاربر جدید: فقط snapshot می‌گیره، ریستارت نمی‌کنه.
     """
     global _sub_enabled_state
@@ -200,8 +198,6 @@ def check_expired_and_restart(conn):
     current_state = get_sub_enable_state(conn)
 
     need_restart = False
-    subs_to_sync: list[tuple[str, int]] = []  # (sub, target_enable)
-
     with _state_lock:
         for sub, cur_enabled in current_state.items():
             if sub not in _sub_enabled_state:
@@ -210,15 +206,14 @@ def check_expired_and_restart(conn):
                 continue
             prev_enabled = _sub_enabled_state[sub]
             if prev_enabled == cur_enabled:
+                # تغییری نشده
                 continue
             # تغییر وضعیت رخ داده
             if prev_enabled and not cur_enabled:
                 print(f"[EXPIRED] sub={sub} → enabled changed True→False, restarting core")
-                subs_to_sync.append((sub, 0))
                 need_restart = True
             elif not prev_enabled and cur_enabled:
                 print(f"[RESTORED] sub={sub} → enabled changed False→True, restarting core")
-                subs_to_sync.append((sub, 1))
                 need_restart = True
             _sub_enabled_state[sub] = cur_enabled
 
@@ -228,55 +223,7 @@ def check_expired_and_restart(conn):
             del _sub_enabled_state[sub]
 
     if need_restart:
-        # اول enable رو در همه inbound های مرتبط یکسان کن
-        for sub, target_enable in subs_to_sync:
-            try:
-                sync_enable_across_inbounds(conn, sub, target_enable)
-            except Exception as e:
-                print(f"[WARN] sync_enable_across_inbounds failed for sub={sub}: {e}")
-        # بعد یک بار ریستارت
         restart_xui_core()
-
-def sync_enable_across_inbounds(conn, sub, target_enable, debug=False):
-    """
-    وضعیت enable رو برای همه inbound هایی که این subId رو دارن یکسان می‌کنه.
-    هم client_traffics و هم inbound settings رو آپدیت می‌کنه.
-    """
-    cur = conn.cursor()
-    cur.execute("SELECT id, settings FROM inbounds")
-    inbound_rows = cur.fetchall()
-
-    affected = []
-    for iid, s in inbound_rows:
-        settings = jload(s)
-        clients = settings.get("clients", [])
-        changed = False
-        for cl in clients:
-            if (cl.get("subId") or cl.get("subscription")) != sub:
-                continue
-            email = cl.get("email") or ""
-            # آپدیت client_traffics
-            cur.execute(
-                "SELECT id, enable FROM client_traffics WHERE inbound_id=? AND email=?",
-                (iid, email)
-            )
-            row = cur.fetchone()
-            if row:
-                rid, cur_en = row
-                cur_en = int(0 if cur_en in (0, "0", False) else 1)
-                if cur_en != target_enable:
-                    cur.execute(
-                        "UPDATE client_traffics SET enable=? WHERE id=?",
-                        (target_enable, rid)
-                    )
-                    affected.append((iid, email))
-                    changed = True
-                    if debug:
-                        print(f"[ENABLE_SYNC] inbound={iid} email={email} enable→{target_enable}")
-
-    conn.commit()
-    if affected:
-        print(f"[ENABLE_SYNC] sub={sub} enable→{target_enable} applied to {len(affected)} inbound(s)")
 
 def sync_once(conn, apply=False, debug=False):
     ensure_meta(conn)
