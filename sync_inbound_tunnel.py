@@ -6,7 +6,7 @@ Syncs traffic (up/down/total) and expiry_time across inbounds
 that share the same remark and have protocol 'tunnel' or 'tun'.
 """
 from __future__ import annotations
-import sqlite3, json, argparse, os, time, shutil
+import sqlite3, json, argparse, os, time, shutil, subprocess, threading
 from datetime import datetime
 
 DB_DEFAULT = "/etc/x-ui/x-ui.db"
@@ -261,6 +261,113 @@ def sync_once(conn, apply=False, debug=False):
     print(f"[APPLIED] {writes} inbound(s) updated")
     return len(plans)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Expiry watcher: هر 10 ثانیه چک می‌کنه آیا اینباند تانلی تازه منقضی شده
+# اگر بله، هسته x-ui رو ریستارت می‌کنه
+# ─────────────────────────────────────────────────────────────────────────────
+
+def restart_xui_core():
+    """Restart x-ui core to drop active connections"""
+    print("[EXPIRY-WATCHER] Restarting x-ui core ...")
+    try:
+        result = subprocess.run(
+            ["x-ui", "restart"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            print("[EXPIRY-WATCHER] Core restarted successfully.")
+        else:
+            print(f"[EXPIRY-WATCHER] Core restart returned code {result.returncode}: {result.stderr.strip()}")
+    except FileNotFoundError:
+        # fallback: try systemctl
+        try:
+            result = subprocess.run(
+                ["systemctl", "restart", "x-ui"],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                print("[EXPIRY-WATCHER] Core restarted via systemctl successfully.")
+            else:
+                print(f"[EXPIRY-WATCHER] systemctl restart returned code {result.returncode}: {result.stderr.strip()}")
+        except Exception as e:
+            print(f"[EXPIRY-WATCHER] Failed to restart core: {e}")
+    except Exception as e:
+        print(f"[EXPIRY-WATCHER] Failed to restart core: {e}")
+
+
+def check_any_tunnel_expired(db_path):
+    """
+    بررسی می‌کنه آیا حداقل یک اینباند تانل منقضی شده:
+    1. تاریخ انقضا گذشته (expiry_time > 0 and expiry_time <= now)
+    2. ترافیک تموم شده (total > 0 and up+down >= total)
+    این چک برای همه اینباندهای tunnel/tun انجام میشه، حتی اگه تنها یک اینباند باشه
+    """
+    try:
+        conn = sqlite3.connect(db_path, timeout=10, check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout = 3000")
+        cur = conn.cursor()
+        now_ms = int(time.time() * 1000)
+
+        placeholders = ",".join("?" for _ in TUNNEL_PROTOCOLS)
+        cur.execute(f"""
+            SELECT id, remark, protocol, up, down, total, expiry_time
+            FROM inbounds
+            WHERE LOWER(protocol) IN ({placeholders})
+              AND (
+                (expiry_time > 0 AND expiry_time <= ?)
+                OR
+                (total > 0 AND (up + down) >= total)
+              )
+            LIMIT 1
+        """, [p.lower() for p in TUNNEL_PROTOCOLS] + [now_ms])
+
+        row = cur.fetchone()
+        conn.close()
+
+        if row:
+            iid, remark, protocol, up, down, total, expiry_time = row
+            reason = []
+            if expiry_time > 0 and expiry_time <= now_ms:
+                reason.append("date_expired")
+            if total > 0 and (up + down) >= total:
+                reason.append("traffic_exhausted")
+            print(f"[EXPIRY-WATCHER] Expired tunnel inbound detected: id={iid} remark={remark} reason={','.join(reason)}")
+            return True
+
+        return False
+
+    except Exception as e:
+        print(f"[EXPIRY-WATCHER] Error checking tunnel expiry: {e}")
+        return False
+
+
+def expiry_watcher_loop(db_path, check_interval=10):
+    """
+    Thread جداگانه که هر check_interval ثانیه وضعیت انقضا رو چک می‌کنه
+    و در صورت شناسایی اینباند منقضی، هسته رو ریستارت می‌کنه
+    """
+    print(f"[EXPIRY-WATCHER] Started (check_interval={check_interval}s)")
+    # نگه‌داری آخرین بار ریستارت برای جلوگیری از ریستارت متوالی
+    last_restart_time = 0
+    # حداقل فاصله بین دو ریستارت (ثانیه)
+    min_restart_gap = 30
+
+    while True:
+        try:
+            time.sleep(check_interval)
+            if check_any_tunnel_expired(db_path):
+                now = time.time()
+                if now - last_restart_time >= min_restart_gap:
+                    restart_xui_core()
+                    last_restart_time = now
+                else:
+                    remaining = int(min_restart_gap - (now - last_restart_time))
+                    print(f"[EXPIRY-WATCHER] Restart skipped (cooldown: {remaining}s remaining)")
+        except Exception as e:
+            print(f"[EXPIRY-WATCHER] Unexpected error: {e}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="WinNet - Inbound Tunnel Sync")
     ap.add_argument("--db", default=DB_DEFAULT, help="Path to x-ui database")
@@ -269,6 +376,10 @@ def main():
     ap.add_argument("--backup", action="store_true", help="Create backup before changes")
     ap.add_argument("--init", action="store_true", help="Initialize meta table")
     ap.add_argument("--debug", action="store_true", help="Enable debug output")
+    ap.add_argument("--expiry-check-interval", type=int, default=10,
+                    help="Interval in seconds for expiry watcher thread (default: 10)")
+    ap.add_argument("--no-expiry-watcher", action="store_true",
+                    help="Disable the expiry watcher thread")
     args = ap.parse_args()
 
     if not os.path.exists(args.db):
@@ -287,6 +398,17 @@ def main():
         if args.init:
             ensure_seed(conn, debug=args.debug)
             return
+
+        # راه‌اندازی expiry watcher thread (فقط در حالت loop و apply)
+        if args.interval > 0 and args.apply and not args.no_expiry_watcher:
+            watcher_thread = threading.Thread(
+                target=expiry_watcher_loop,
+                args=(args.db, args.expiry_check_interval),
+                daemon=True,
+                name="expiry-watcher"
+            )
+            watcher_thread.start()
+
         if args.interval <= 0:
             sync_once(conn, apply=args.apply, debug=args.debug)
         else:
