@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import sqlite3, json, argparse, os, time, shutil, subprocess
+import sqlite3, json, argparse, os, time, shutil, subprocess, threading
 from datetime import datetime
 
 DB_DEFAULT = "/etc/x-ui/x-ui.db"
@@ -338,7 +338,6 @@ def sync_once(conn, apply=False, debug=False):
         cur.execute("UPDATE inbounds SET settings=? WHERE id=?", (jdump(s), iid))
 
     ct_writes=0; set_writes=0
-    need_xray_restart = False
     for p in plans:
         iid=p["iid"]; email=p["email"]; ch=p["changes"]; ref=p["ref_sig"]; reset_flag=p.get("reset_flag", False)
 
@@ -408,10 +407,6 @@ def sync_once(conn, apply=False, debug=False):
             new_enable = en0
             if "enable" in ch:
                 new_enable = int(ch["enable"][1])
-                # اگر کاربر تازه disable شد (از 1 به 0)، xray باید ریستارت بشه
-                if en0 == 1 and new_enable == 0:
-                    need_xray_restart = True
-                    print(f"[XRAY] Client '{email}' expired → xray will restart.")
 
             if rid:
                 cur.execute("UPDATE client_traffics SET up=?,down=?,total=?,expiry_time=?,enable=?,reset=0 WHERE id=?",
@@ -481,12 +476,114 @@ def sync_once(conn, apply=False, debug=False):
     conn.commit()
     print(f"[APPLIED] settings_updated={set_writes}, traffic_rows_written={ct_writes}")
 
-    # ریستارت xray در صورت منقضی شدن کاربر
-    if need_xray_restart:
-        subprocess.run(["x-ui", "restart"], check=False)
-        print("[XRAY] x-ui restart executed.")
-
     return len(plans)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Expiry watcher: هر 10 ثانیه چک می‌کنه آیا کاربری تازه منقضی شده
+# اگر بله، هسته x-ui رو ریستارت می‌کنه
+# ─────────────────────────────────────────────────────────────────────────────
+
+def restart_xui_core():
+    """Restart x-ui core to drop active connections"""
+    print("[EXPIRY-WATCHER] Restarting x-ui core ...")
+    try:
+        result = subprocess.run(
+            ["x-ui", "restart"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            print("[EXPIRY-WATCHER] Core restarted successfully.")
+        else:
+            print(f"[EXPIRY-WATCHER] Core restart returned code {result.returncode}: {result.stderr.strip()}")
+    except FileNotFoundError:
+        # fallback: try systemctl
+        try:
+            result = subprocess.run(
+                ["systemctl", "restart", "x-ui"],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                print("[EXPIRY-WATCHER] Core restarted via systemctl successfully.")
+            else:
+                print(f"[EXPIRY-WATCHER] systemctl restart returned code {result.returncode}: {result.stderr.strip()}")
+        except Exception as e:
+            print(f"[EXPIRY-WATCHER] Failed to restart core: {e}")
+    except Exception as e:
+        print(f"[EXPIRY-WATCHER] Failed to restart core: {e}")
+
+
+def check_any_client_expired(db_path):
+    """
+    بررسی می‌کنه آیا حداقل یک کاربر در client_traffics منقضی شده
+    (ترافیک تموم شده یا تاریخ گذشته) ولی هنوز enable=1 هست
+    """
+    try:
+        conn = sqlite3.connect(db_path, timeout=10, check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout = 3000")
+        cur = conn.cursor()
+        now_ms = int(time.time() * 1000)
+
+        # کاربرانی که enable=1 هستن ولی باید disable بشن:
+        # 1. تاریخ انقضا گذشته (expiry_time > 0 and expiry_time <= now)
+        # 2. ترافیک تموم شده (total > 0 and up+down >= total)
+        cur.execute("""
+            SELECT id, email, up, down, total, expiry_time, enable
+            FROM client_traffics
+            WHERE enable = 1
+              AND (
+                (expiry_time > 0 AND expiry_time <= ?)
+                OR
+                (total > 0 AND (up + down) >= total)
+              )
+            LIMIT 1
+        """, (now_ms,))
+
+        row = cur.fetchone()
+        conn.close()
+
+        if row:
+            rid, email, up, down, total, expiry_time, enable = row
+            reason = []
+            if expiry_time > 0 and expiry_time <= now_ms:
+                reason.append("date_expired")
+            if total > 0 and (up + down) >= total:
+                reason.append("traffic_exhausted")
+            print(f"[EXPIRY-WATCHER] Expired client detected: email={email} reason={','.join(reason)}")
+            return True
+
+        return False
+
+    except Exception as e:
+        print(f"[EXPIRY-WATCHER] Error checking expiry: {e}")
+        return False
+
+
+def expiry_watcher_loop(db_path, check_interval=10):
+    """
+    Thread جداگانه که هر check_interval ثانیه وضعیت انقضا رو چک می‌کنه
+    و در صورت شناسایی کاربر منقضی، هسته رو ریستارت می‌کنه
+    """
+    print(f"[EXPIRY-WATCHER] Started (check_interval={check_interval}s)")
+    # نگه‌داری آخرین بار ریستارت برای جلوگیری از ریستارت متوالی
+    last_restart_time = 0
+    # حداقل فاصله بین دو ریستارت (ثانیه) - جلوگیری از ریستارت‌های پشت‌سرهم
+    min_restart_gap = 30
+
+    while True:
+        try:
+            time.sleep(check_interval)
+            if check_any_client_expired(db_path):
+                now = time.time()
+                if now - last_restart_time >= min_restart_gap:
+                    restart_xui_core()
+                    last_restart_time = now
+                else:
+                    remaining = int(min_restart_gap - (now - last_restart_time))
+                    print(f"[EXPIRY-WATCHER] Restart skipped (cooldown: {remaining}s remaining)")
+        except Exception as e:
+            print(f"[EXPIRY-WATCHER] Unexpected error: {e}")
+
 
 def main():
     ap=argparse.ArgumentParser()
@@ -496,6 +593,10 @@ def main():
     ap.add_argument("--backup", action="store_true")
     ap.add_argument("--init", action="store_true")
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--expiry-check-interval", type=int, default=10,
+                    help="Interval in seconds for expiry watcher thread (default: 10)")
+    ap.add_argument("--no-expiry-watcher", action="store_true",
+                    help="Disable the expiry watcher thread")
     args=ap.parse_args()
 
     if not os.path.exists(args.db):
@@ -511,6 +612,17 @@ def main():
     try:
         if args.init:
             ensure_seed(conn, debug=args.debug); return
+
+        # راه‌اندازی expiry watcher thread (فقط در حالت loop و apply)
+        if args.interval > 0 and args.apply and not args.no_expiry_watcher:
+            watcher_thread = threading.Thread(
+                target=expiry_watcher_loop,
+                args=(args.db, args.expiry_check_interval),
+                daemon=True,
+                name="expiry-watcher"
+            )
+            watcher_thread.start()
+
         if args.interval<=0:
             sync_once(conn, apply=args.apply, debug=args.debug)
         else:
