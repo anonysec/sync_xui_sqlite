@@ -135,77 +135,94 @@ def ensure_seed(conn, debug=False):
     if debug: print(f"[INFO] seeded {n} entries")
 
 def restart_xui_core():
-    """ریستارت هسته x-ui برای قطع یا برقراری اتصال کاربر"""
+    """ریستارت هسته x-ui برای قطع/برقراری اتصال کاربر"""
     try:
         subprocess.run(["x-ui", "restart"], check=True, capture_output=True)
         print("[INFO] x-ui core restarted")
     except Exception as e:
         print(f"[WARN] x-ui restart failed: {e}")
 
-# وضعیت قبلی enable به تفکیک subId (نه inbound_id)
-# کلید: subId | مقدار: وضعیت enable کل سابسکریپشن (0 یا 1)
-# یک سابسکریپشن زمانی فعاله که حداقل یک inbound آن enable=1 باشد
-_prev_sub_enable_state: dict = {}
+# وضعیت enable به تفکیک subId (نه inbound)
+# True = حداقل یک inbound فعال دارد، False = همه منقضی هستند
+# None = کاربر تازه اضافه شده، هنوز snapshot نگرفتیم
+_sub_enabled_state: dict[str, bool] = {}
+_state_lock = threading.Lock()
 
-def check_expired_and_restart(conn):
+def get_sub_enable_state(conn) -> dict[str, bool]:
     """
-    هر 5 ثانیه یک‌بار وضعیت enable رو به تفکیک subId چک می‌کنه.
-    فقط در دو حالت ریستارت می‌کنه:
-      1. سابسکریپشن از فعال به منقضی رفت (1→0)
-      2. سابسکریپشن از منقضی به فعال برگشت (0→1)
-    برای هر subId حداکثر یک بار ریستارت انجام می‌شه.
+    وضعیت enable هر subId رو از دیتابیس می‌خونه.
+    یک subId فعال است اگر حداقل یک ردیف client_traffics با enable=1 داشته باشد.
     """
-    global _prev_sub_enable_state
-
-    # نقشه subId → email های موجود در inbounds (برای تطابق با client_traffics)
     cur = conn.cursor()
+    # subId رو از inbound settings می‌خونیم
+    cur.execute("SELECT id, settings FROM inbounds")
+    inbound_rows = cur.fetchall()
 
-    # ابتدا نقشه email → subId رو از inbounds می‌سازیم
-    cur.execute("SELECT settings FROM inbounds")
-    email_to_sub: dict = {}
-    for (s,) in cur.fetchall():
+    # ساخت map از (inbound_id, email) → subId
+    email_sub_map: dict[tuple, str] = {}
+    for iid, s in inbound_rows:
         settings = jload(s)
         for cl in settings.get("clients", []):
             sub = cl.get("subId") or cl.get("subscription")
+            if not sub:
+                continue
             email = cl.get("email") or ""
-            if sub and email:
-                email_to_sub[email] = sub
+            email_sub_map[(int(iid), email)] = sub
 
-    # وضعیت enable فعلی به تفکیک subId
-    # یک subId فعاله اگر حداقل یک ردیف client_traffics با enable=1 داشته باشه
-    cur.execute("SELECT email, enable FROM client_traffics")
-    rows = cur.fetchall()
+    # خواندن وضعیت enable از client_traffics
+    cur.execute("SELECT inbound_id, email, enable FROM client_traffics")
+    ct_rows = cur.fetchall()
 
-    new_sub_state: dict = {}
-    for email, enable in rows:
-        sub = email_to_sub.get(email or "")
+    sub_any_enabled: dict[str, bool] = {}
+    for iid, email, enable in ct_rows:
+        sub = email_sub_map.get((int(iid), email or ""))
         if not sub:
             continue
         cur_enable = int(0 if enable in (0, "0", False) else 1)
-        # اگر حتی یک inbound فعال باشه، کل subId فعاله
-        prev_val = new_sub_state.get(sub, 0)
-        new_sub_state[sub] = max(prev_val, cur_enable)
+        # اگر حتی یک inbound فعال باشد، کل sub فعال است
+        if sub not in sub_any_enabled:
+            sub_any_enabled[sub] = False
+        if cur_enable == 1:
+            sub_any_enabled[sub] = True
 
-    # بررسی تغییرات - فقط برای subIdهایی که قبلاً دیده شدن
-    subs_to_restart = set()
-    for sub, cur_enable in new_sub_state.items():
-        prev = _prev_sub_enable_state.get(sub)
-        if prev is None:
-            # اولین بار دیده می‌شه → فقط snapshot بگیر، ریستارت نکن
-            continue
-        if prev == 1 and cur_enable == 0:
-            # منقضی شد
-            print(f"[EXPIRED] sub={sub} → enable 1→0, will restart core")
-            subs_to_restart.add(sub)
-        elif prev == 0 and cur_enable == 1:
-            # از انقضا برگشت
-            print(f"[RESTORED] sub={sub} → enable 0→1, will restart core")
-            subs_to_restart.add(sub)
+    return sub_any_enabled
 
-    _prev_sub_enable_state = new_sub_state
+def check_expired_and_restart(conn):
+    """
+    وضعیت فعلی subId ها رو با وضعیت قبلی مقایسه می‌کنه.
+    فقط وقتی تغییر وضعیت واقعی رخ داده (فعال→منقضی یا منقضی→فعال) ریستارت می‌کنه.
+    کاربر جدید: فقط snapshot می‌گیره، ریستارت نمی‌کنه.
+    """
+    global _sub_enabled_state
 
-    if subs_to_restart:
-        # برای همه subIdهای تغییر یافته فقط یک بار ریستارت
+    current_state = get_sub_enable_state(conn)
+
+    need_restart = False
+    with _state_lock:
+        for sub, cur_enabled in current_state.items():
+            if sub not in _sub_enabled_state:
+                # کاربر جدید → فقط snapshot بگیر، ریستارت نکن
+                _sub_enabled_state[sub] = cur_enabled
+                continue
+            prev_enabled = _sub_enabled_state[sub]
+            if prev_enabled == cur_enabled:
+                # تغییری نشده
+                continue
+            # تغییر وضعیت رخ داده
+            if prev_enabled and not cur_enabled:
+                print(f"[EXPIRED] sub={sub} → enabled changed True→False, restarting core")
+                need_restart = True
+            elif not prev_enabled and cur_enabled:
+                print(f"[RESTORED] sub={sub} → enabled changed False→True, restarting core")
+                need_restart = True
+            _sub_enabled_state[sub] = cur_enabled
+
+        # حذف subId هایی که دیگه وجود ندارند
+        gone = set(_sub_enabled_state.keys()) - set(current_state.keys())
+        for sub in gone:
+            del _sub_enabled_state[sub]
+
+    if need_restart:
         restart_xui_core()
 
 def sync_once(conn, apply=False, debug=False):
@@ -553,10 +570,12 @@ def main():
         else:
             print(f"[INFO] loop interval={args.interval}s apply={args.apply}")
 
-            # اول یک snapshot اولیه می‌گیره بدون ریستارت
-            # تا کاربرهایی که از قبل disable بودن باعث ریستارت غیرضروری نشن
-            check_expired_and_restart(conn)
-            print("[INFO] expiry_watcher initial snapshot taken")
+            # snapshot اولیه بدون ریستارت - فقط برای پر کردن _sub_enabled_state
+            initial_state = get_sub_enable_state(conn)
+            with _state_lock:
+                for sub, enabled in initial_state.items():
+                    _sub_enabled_state[sub] = enabled
+            print(f"[INFO] expiry_watcher: initial snapshot taken for {len(initial_state)} subscriptions")
 
             def expiry_watcher():
                 while True:
