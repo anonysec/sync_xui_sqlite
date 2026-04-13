@@ -6,7 +6,7 @@ Syncs traffic (up/down/total) and expiry_time across inbounds
 that share the same remark and have protocol 'tunnel' or 'tun'.
 """
 from __future__ import annotations
-import sqlite3, json, argparse, os, time, shutil, subprocess, threading
+import sqlite3, json, argparse, os, time, shutil
 from datetime import datetime
 
 DB_DEFAULT = "/etc/x-ui/x-ui.db"
@@ -261,106 +261,6 @@ def sync_once(conn, apply=False, debug=False):
     print(f"[APPLIED] {writes} inbound(s) updated")
     return len(plans)
 
-
-# ---------------------------------------------------------------------------
-# قابلیت جدید: بررسی مستقل منقضی‌شدن tunnel inboundها هر 10 ثانیه
-# ---------------------------------------------------------------------------
-
-def restart_xui_core():
-    """ریستارت هسته x-ui"""
-    try:
-        subprocess.run(["x-ui", "restart"], capture_output=True, timeout=30)
-        print(f"[EXPIRE-WATCHER] Core restarted via 'x-ui restart'")
-    except Exception:
-        try:
-            subprocess.run(["systemctl", "restart", "x-ui"], capture_output=True, timeout=30)
-            print(f"[EXPIRE-WATCHER] Core restarted via 'systemctl restart x-ui'")
-        except Exception as e:
-            print(f"[EXPIRE-WATCHER] Failed to restart core: {e}")
-
-def expire_watcher_loop(db_path, check_interval=10):
-    """
-    هر 10 ثانیه مستقل از لوپ اصلی چک می‌کنه:
-    - tunnel inboundهایی که تاریخشان تموم شده یا ترافیکشان تموم شده
-    - اگه هنوز enable=1 باشن، غیرفعالشون می‌کنه
-    - بعد هسته رو ریستارت می‌کنه
-    inboundهایی که تنها یک عدد هم هستند (بدون گروه) هم بررسی می‌شوند
-    """
-    print(f"[EXPIRE-WATCHER] Started (interval={check_interval}s)")
-    while True:
-        time.sleep(check_interval)
-        try:
-            conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
-            conn.execute("PRAGMA busy_timeout = 3000")
-            try:
-                _expire_watcher_tick(conn)
-            finally:
-                conn.close()
-        except Exception as e:
-            print(f"[EXPIRE-WATCHER] Error: {e}")
-
-def _expire_watcher_tick(conn):
-    """یک دور بررسی و غیرفعال‌کردن tunnel inboundهای منقضی‌شده"""
-    now_ms = int(time.time() * 1000)
-    now_s  = int(time.time())
-    cur = conn.cursor()
-
-    # لود همه tunnel inboundهایی که هنوز enable هستند - بدون هیچ محدودیت گروه‌بندی
-    placeholders = ",".join("?" for _ in TUNNEL_PROTOCOLS)
-    cur.execute(f"""
-        SELECT id, remark, protocol, up, down, total, expiry_time, enable
-        FROM inbounds
-        WHERE LOWER(protocol) IN ({placeholders})
-        AND enable = 1
-    """, [p.lower() for p in TUNNEL_PROTOCOLS])
-    rows = cur.fetchall()
-
-    disabled_ids = []
-
-    for iid, remark, protocol, up, down, total, expiry_time, enable in rows:
-        up          = int(up or 0)
-        down        = int(down or 0)
-        total       = int(total or 0)
-        expiry_time = int(expiry_time or 0)
-        used        = up + down
-
-        # expiry_time ممکنه میلی‌ثانیه یا ثانیه باشه - هر دو رو پوشش میدیم
-        if expiry_time > 0:
-            # اگه مقدار بزرگتر از سال 3000 میلادی در ثانیه باشه، یعنی میلی‌ثانیه‌ست
-            if expiry_time > 32503680000:
-                expired_by_date = expiry_time <= now_ms
-            else:
-                expired_by_date = expiry_time <= now_s
-        else:
-            expired_by_date = False
-
-        expired_by_traffic = (total > 0 and used >= total)
-
-        if expired_by_date or expired_by_traffic:
-            reason = []
-            if expired_by_date:
-                reason.append("date")
-            if expired_by_traffic:
-                reason.append("traffic")
-            print(f"[EXPIRE-WATCHER] Disabling inbound id={iid} remark={remark} reason={','.join(reason)}")
-            disabled_ids.append(int(iid))
-
-    if not disabled_ids:
-        return
-
-    # غیرفعال کردن همه inboundهای منقضی‌شده
-    cur.execute(
-        "UPDATE inbounds SET enable=0 WHERE id IN ({})".format(
-            ",".join("?" for _ in disabled_ids)
-        ),
-        disabled_ids
-    )
-
-    conn.commit()
-    print(f"[EXPIRE-WATCHER] Disabled {len(disabled_ids)} tunnel inbound(s), restarting core...")
-    restart_xui_core()
-
-
 def main():
     ap = argparse.ArgumentParser(description="WinNet - Inbound Tunnel Sync")
     ap.add_argument("--db", default=DB_DEFAULT, help="Path to x-ui database")
@@ -369,9 +269,6 @@ def main():
     ap.add_argument("--backup", action="store_true", help="Create backup before changes")
     ap.add_argument("--init", action="store_true", help="Initialize meta table")
     ap.add_argument("--debug", action="store_true", help="Enable debug output")
-    ap.add_argument("--expire-check-interval", type=int, default=10,
-                    dest="expire_check_interval",
-                    help="Interval in seconds for independent expire watcher (default: 10)")
     args = ap.parse_args()
 
     if not os.path.exists(args.db):
@@ -393,15 +290,6 @@ def main():
         if args.interval <= 0:
             sync_once(conn, apply=args.apply, debug=args.debug)
         else:
-            # اگه --apply باشه، thread مستقل expire watcher رو راه‌اندازی کن
-            if args.apply:
-                watcher_thread = threading.Thread(
-                    target=expire_watcher_loop,
-                    args=(args.db, args.expire_check_interval),
-                    daemon=True
-                )
-                watcher_thread.start()
-
             print(f"[INFO] Loop interval={args.interval}s apply={args.apply}")
             while True:
                 try:
