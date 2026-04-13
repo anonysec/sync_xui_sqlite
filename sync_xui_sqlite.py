@@ -65,44 +65,31 @@ def used_from_ct(ct):
     return int(ct.get("up") or 0) + int(ct.get("down") or 0)
 
 def is_expired_by_date(expiry_val):
-    """Check if client is expired by date"""
     if not expiry_val or expiry_val <= 0:
         return False
     now_ms = int(time.time() * 1000)
     return expiry_val <= now_ms
 
 def is_expired_by_traffic(quota_gb, used_bytes):
-    """Check if client is expired by traffic quota"""
     if not quota_gb or quota_gb <= 0:
         return False
     quota_bytes = quota_gb * 1024 * 1024 * 1024
     return used_bytes >= quota_bytes
 
 def should_be_enabled(client, ct):
-    """Determine if client should be enabled based on current state"""
-    # Get quota in GB
     quota_gb = client.get("totalGB", 0)
     try:
         quota_gb = int(quota_gb) if quota_gb else 0
     except:
         quota_gb = 0
-    
-    # Get expiry time
     expiry = client.get("expiryTime", 0)
     try:
         expiry = int(expiry) if expiry else 0
     except:
         expiry = 0
-    
-    # Get used traffic
     used = used_from_ct(ct)
-    
-    # Check expiration conditions
     expired_by_date = is_expired_by_date(expiry)
     expired_by_traffic = is_expired_by_traffic(quota_gb, used)
-    
-    # Client should be disabled if expired by either condition
-    # Client should be enabled if not expired
     return not (expired_by_date or expired_by_traffic)
 
 def signature(client, ct):
@@ -148,39 +135,77 @@ def ensure_seed(conn, debug=False):
     if debug: print(f"[INFO] seeded {n} entries")
 
 def restart_xui_core():
-    """ریستارت هسته x-ui برای قطع اتصال کاربران منقضی‌شده"""
+    """ریستارت هسته x-ui برای قطع یا برقراری اتصال کاربر"""
     try:
         subprocess.run(["x-ui", "restart"], check=True, capture_output=True)
-        print("[INFO] x-ui core restarted (expired client detected)")
+        print("[INFO] x-ui core restarted")
     except Exception as e:
         print(f"[WARN] x-ui restart failed: {e}")
 
-# وضعیت قبلی enable کاربران برای تشخیص لحظه انقضا
-_prev_enable_state: dict = {}
+# وضعیت قبلی enable به تفکیک subId (نه inbound_id)
+# کلید: subId | مقدار: وضعیت enable کل سابسکریپشن (0 یا 1)
+# یک سابسکریپشن زمانی فعاله که حداقل یک inbound آن enable=1 باشد
+_prev_sub_enable_state: dict = {}
 
 def check_expired_and_restart(conn):
     """
-    هر چند ثانیه یک‌بار فقط client_traffics رو چک می‌کنه.
-    اگر کاربری که قبلاً enable=1 بود الان enable=0 شده باشه → فوری ریستارت.
+    هر 5 ثانیه یک‌بار وضعیت enable رو به تفکیک subId چک می‌کنه.
+    فقط در دو حالت ریستارت می‌کنه:
+      1. سابسکریپشن از فعال به منقضی رفت (1→0)
+      2. سابسکریپشن از منقضی به فعال برگشت (0→1)
+    برای هر subId حداکثر یک بار ریستارت انجام می‌شه.
     """
-    global _prev_enable_state
+    global _prev_sub_enable_state
+
+    # نقشه subId → email های موجود در inbounds (برای تطابق با client_traffics)
     cur = conn.cursor()
-    cur.execute("SELECT inbound_id, email, enable FROM client_traffics")
+
+    # ابتدا نقشه email → subId رو از inbounds می‌سازیم
+    cur.execute("SELECT settings FROM inbounds")
+    email_to_sub: dict = {}
+    for (s,) in cur.fetchall():
+        settings = jload(s)
+        for cl in settings.get("clients", []):
+            sub = cl.get("subId") or cl.get("subscription")
+            email = cl.get("email") or ""
+            if sub and email:
+                email_to_sub[email] = sub
+
+    # وضعیت enable فعلی به تفکیک subId
+    # یک subId فعاله اگر حداقل یک ردیف client_traffics با enable=1 داشته باشه
+    cur.execute("SELECT email, enable FROM client_traffics")
     rows = cur.fetchall()
 
-    need_restart = False
-    new_state = {}
-    for iid, email, enable in rows:
-        key = (int(iid), email or "")
+    new_sub_state: dict = {}
+    for email, enable in rows:
+        sub = email_to_sub.get(email or "")
+        if not sub:
+            continue
         cur_enable = int(0 if enable in (0, "0", False) else 1)
-        new_state[key] = cur_enable
-        prev = _prev_enable_state.get(key)
-        if prev is not None and prev == 1 and cur_enable == 0:
-            print(f"[EXPIRED] inbound={iid} email={email} → enable changed 1→0, restarting core")
-            need_restart = True
+        # اگر حتی یک inbound فعال باشه، کل subId فعاله
+        prev_val = new_sub_state.get(sub, 0)
+        new_sub_state[sub] = max(prev_val, cur_enable)
 
-    _prev_enable_state = new_state
-    if need_restart:
+    # بررسی تغییرات - فقط برای subIdهایی که قبلاً دیده شدن
+    subs_to_restart = set()
+    for sub, cur_enable in new_sub_state.items():
+        prev = _prev_sub_enable_state.get(sub)
+        if prev is None:
+            # اولین بار دیده می‌شه → فقط snapshot بگیر، ریستارت نکن
+            continue
+        if prev == 1 and cur_enable == 0:
+            # منقضی شد
+            print(f"[EXPIRED] sub={sub} → enable 1→0, will restart core")
+            subs_to_restart.add(sub)
+        elif prev == 0 and cur_enable == 1:
+            # از انقضا برگشت
+            print(f"[RESTORED] sub={sub} → enable 0→1, will restart core")
+            subs_to_restart.add(sub)
+
+    _prev_sub_enable_state = new_sub_state
+
+    if subs_to_restart:
+        # برای همه subIdهای تغییر یافته فقط یک بار ریستارت
         restart_xui_core()
 
 def sync_once(conn, apply=False, debug=False):
@@ -234,10 +259,8 @@ def sync_once(conn, apply=False, debug=False):
         ref = with_lc[0][1]
         ref_sig = ref["sig"]
         ref_client = ref["client"]
-        # determine reference updated_at (ms) from the reference inbound client settings
         ref_updated = int(ref_client.get("updated_at") or 0)
         if not ref_updated:
-            # try to get updated_at from the inbounds table for the reference inbound
             try:
                 cur.execute("SELECT settings FROM inbounds WHERE id=?", (ref["iid"],))
                 rr = cur.fetchone()
@@ -252,7 +275,6 @@ def sync_once(conn, apply=False, debug=False):
         if not ref_updated:
             ref_updated = int(time.time() * 1000)
 
-        # پیدا کردن بیشترین up و down به صورت جداگانه از همه inboundها
         max_up_across = 0
         max_down_across = 0
         for _, e in with_lc:
@@ -264,12 +286,10 @@ def sync_once(conn, apply=False, debug=False):
         
         max_used_across = max_up_across + max_down_across
 
-        # چک کردن reset flag
         group_reset_flag = any(int(x[1]["sig"].get("reset") or 0)==1 for x in with_lc) \
                            or int(ref_sig.get("reset") or 0)==1 \
                            or (int(ref_sig.get("used") or 0) < max_used_across)
 
-        # Determine if reference client should be enabled
         ref_should_enable = should_be_enabled(ref_client, ref["ct"])
 
         for _, e in with_lc:
@@ -299,19 +319,15 @@ def sync_once(conn, apply=False, debug=False):
             if cur_com != ref_com:
                 ch["comment"]=(cur_com, ref_com)
 
-            # بررسی تغییرات up و down - فقط اگر مقدار فعلی کمتر از max باشد
             cur_up = int(e["sig"].get("up") or 0)
             cur_down = int(e["sig"].get("down") or 0)
             
-            # اگر reset flag فعال باشد، از مقادیر reference استفاده کن
-            # در غیر این صورت فقط اگر کمتر از max باشد، به max تغییر بده
             if group_reset_flag:
                 target_up = int(ref_sig.get("up") or 0)
                 target_down = int(ref_sig.get("down") or 0)
                 if cur_up != target_up or cur_down != target_down:
                     ch["up_down"] = ((cur_up, cur_down), (target_up, target_down))
             else:
-                # فقط اگر مقدار فعلی کمتر از max باشد، تغییر بده
                 target_up = max_up_across if cur_up < max_up_across else cur_up
                 target_down = max_down_across if cur_down < max_down_across else cur_down
                 if cur_up < max_up_across or cur_down < max_down_across:
@@ -334,14 +350,12 @@ def sync_once(conn, apply=False, debug=False):
                 if cur_quota_db != q_target:
                     ch["quota_db"]=(cur_quota_db, q_target)
 
-            # Check enable status
             cur_enable = int(e["sig"].get("enable", 1))
             target_enable = 1 if ref_should_enable else 0
             if cur_enable != target_enable:
                 ch["enable"] = (cur_enable, target_enable)
 
             if ch:
-                # برای حالت غیر reset، target_up و target_down رو به درستی ست کن
                 if not group_reset_flag:
                     target_up = max_up_across if "up_down" in ch else cur_up
                     target_down = max_down_across if "up_down" in ch else cur_down
@@ -374,8 +388,6 @@ def sync_once(conn, apply=False, debug=False):
         cur.execute("UPDATE inbounds SET settings=? WHERE id=?", (jdump(s), iid))
 
     ct_writes=0; set_writes=0
-    # ردیابی اینکه آیا در این سیکل کاربری از enabled به disabled رفت
-    client_just_expired = False
 
     for p in plans:
         iid=p["iid"]; email=p["email"]; ch=p["changes"]; ref=p["ref_sig"]; reset_flag=p.get("reset_flag", False)
@@ -400,7 +412,6 @@ def sync_once(conn, apply=False, debug=False):
                         c["updated_at"] = int(p.get("ref_updated") or int(time.time() * 1000))
                     break
             if changed:
-                # ensure updated_at is set to reference timestamp for this client
                 try:
                     for cc in s.get("clients", []):
                         if (cc.get("subId") or cc.get("subscription"))==p["sub"] and ((cc.get("email") or "")==p["email"]):
@@ -422,7 +433,6 @@ def sync_once(conn, apply=False, debug=False):
                 up0=int(up0 or 0); down0=int(down0 or 0); tot0=int(tot0 or 0); exp0=int(exp0 or 0)
                 en0=int(0 if en0 in (0,"0",False) else 1); reset0=int(reset0 or 0)
 
-            # استفاده از target_up و target_down
             if "up_down" in ch:
                 new_up = p.get("target_up", up0)
                 new_down = p.get("target_down", down0)
@@ -434,7 +444,6 @@ def sync_once(conn, apply=False, debug=False):
             if "quota_db" in ch:
                 new_quota_db = int(ch["quota_db"][1])
             
-            # اطمینان از اینکه quota_db از مجموع up+down کمتر نباشد
             total_used = new_up + new_down
             if new_quota_db > 0 and new_quota_db < total_used:
                 new_quota_db = total_used
@@ -446,10 +455,6 @@ def sync_once(conn, apply=False, debug=False):
             new_enable = en0
             if "enable" in ch:
                 new_enable = int(ch["enable"][1])
-                # اگر کاربر در این اینباند از فعال به غیرفعال رفت → نشانه‌گذاری برای ریستارت هسته
-                if en0 == 1 and new_enable == 0:
-                    client_just_expired = True
-                    print(f"[INFO] Client expired: sub={p['sub']} email={email} inbound={iid}")
 
             if rid:
                 cur.execute("UPDATE client_traffics SET up=?,down=?,total=?,expiry_time=?,enable=?,reset=0 WHERE id=?",
@@ -460,7 +465,6 @@ def sync_once(conn, apply=False, debug=False):
 
             ct_writes+=1
 
-            # After writing traffic row, ensure inbound settings client.updated_at matches reference timestamp
             try:
                 s = get_settings(iid)
                 changed2 = False
@@ -519,10 +523,6 @@ def sync_once(conn, apply=False, debug=False):
     conn.commit()
     print(f"[APPLIED] settings_updated={set_writes}, traffic_rows_written={ct_writes}")
 
-    # اگر در این سیکل کاربری منقضی شد → فوری ریستارت هسته تا اتصالش قطع بشه
-    if client_just_expired:
-        restart_xui_core()
-
     return len(plans)
 
 def main():
@@ -553,10 +553,10 @@ def main():
         else:
             print(f"[INFO] loop interval={args.interval}s apply={args.apply}")
 
-            # --- thread جداگانه برای بررسی انقضا هر 5 ثانیه ---
-            # اول یک snapshot از وضعیت فعلی می‌گیره تا کاربرهایی که
-            # از قبل disable بودن باعث ریستارت غیرضروری نشن
-            check_expired_and_restart(conn)  # populate _prev_enable_state بدون ریستارت
+            # اول یک snapshot اولیه می‌گیره بدون ریستارت
+            # تا کاربرهایی که از قبل disable بودن باعث ریستارت غیرضروری نشن
+            check_expired_and_restart(conn)
+            print("[INFO] expiry_watcher initial snapshot taken")
 
             def expiry_watcher():
                 while True:
@@ -570,7 +570,6 @@ def main():
             t.start()
             print("[INFO] expiry_watcher started (check every 5s)")
 
-            # --- حلقه اصلی sync ---
             while True:
                 try:
                     sync_once(conn, apply=args.apply, debug=args.debug)
