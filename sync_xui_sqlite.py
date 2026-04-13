@@ -486,11 +486,11 @@ def sync_once(conn, apply=False, debug=False):
 def restart_xui_core():
     """ریستارت هسته x-ui"""
     try:
-        subprocess.run(["x-ui", "restart"], check=True, capture_output=True)
+        result = subprocess.run(["x-ui", "restart"], capture_output=True, timeout=30)
         print(f"[EXPIRE-WATCHER] Core restarted via 'x-ui restart'")
     except Exception:
         try:
-            subprocess.run(["systemctl", "restart", "x-ui"], check=True, capture_output=True)
+            subprocess.run(["systemctl", "restart", "x-ui"], capture_output=True, timeout=30)
             print(f"[EXPIRE-WATCHER] Core restarted via 'systemctl restart x-ui'")
         except Exception as e:
             print(f"[EXPIRE-WATCHER] Failed to restart core: {e}")
@@ -528,7 +528,10 @@ def _expire_watcher_tick(conn):
     """)
     rows = cur.fetchall()
 
-    disabled_emails = set()
+    # ایمیل‌هایی که باید غیرفعال بشن - فقط بر اساس email (نه ترکیب iid+email)
+    # تا در همه inboundها غیرفعال بشن
+    emails_to_disable = set()
+    ct_ids_to_disable = []
 
     for rid, iid, email, up, down, total, expiry_time, enable in rows:
         up = int(up or 0)
@@ -548,32 +551,41 @@ def _expire_watcher_tick(conn):
                 reason.append("traffic")
             print(f"[EXPIRE-WATCHER] Disabling email={email} iid={iid} reason={','.join(reason)}")
 
-            # غیرفعال کردن در client_traffics
-            cur.execute("UPDATE client_traffics SET enable=0 WHERE id=?", (rid,))
-            disabled_emails.add((int(iid), email or ""))
+            ct_ids_to_disable.append(rid)
+            emails_to_disable.add(email or "")
 
-    if not disabled_emails:
+    if not emails_to_disable:
         return
 
-    # غیرفعال کردن در inbounds settings (فیلد enable روی کلاینت)
+    # غیرفعال کردن در client_traffics - همه ردیف‌های این ایمیل‌ها (در همه inboundها)
+    cur.execute(
+        "UPDATE client_traffics SET enable=0 WHERE email IN ({})".format(
+            ",".join("?" for _ in emails_to_disable)
+        ),
+        list(emails_to_disable)
+    )
+
+    # غیرفعال کردن در inbounds settings در همه inboundها (نه فقط همون inbound)
     cur.execute("SELECT id, settings FROM inbounds")
     inbound_rows = cur.fetchall()
+    changed_count = 0
     for iid_db, settings_raw in inbound_rows:
         settings = jload(settings_raw)
         clients = settings.get("clients", [])
         changed = False
         for c in clients:
             email_c = c.get("email") or ""
-            if (int(iid_db), email_c) in disabled_emails:
+            if email_c in emails_to_disable:
                 if c.get("enable", True) not in (False, 0, "0"):
                     c["enable"] = False
                     changed = True
         if changed:
             cur.execute("UPDATE inbounds SET settings=? WHERE id=?",
                         (jdump(settings), iid_db))
+            changed_count += 1
 
     conn.commit()
-    print(f"[EXPIRE-WATCHER] Disabled {len(disabled_emails)} client(s), restarting core...")
+    print(f"[EXPIRE-WATCHER] Disabled {len(emails_to_disable)} client(s) across {changed_count} inbound(s), restarting core...")
     restart_xui_core()
 
 
