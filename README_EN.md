@@ -29,17 +29,42 @@ With this script, you can easily create multi-inbound accounts with all versions
 
 Smart and automatic installation of all prerequisites and complete script configuration.
 
-## Quick installation instructions :
+### Linux Installation:
 
 ```bash
 apt install curl -y && bash <(curl -s https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main/install.sh --ipv4)
 ```
 
+### Windows Installation:
+
+1. Download the project files from GitHub
+2. Extract the ZIP file
+3. Open PowerShell as Administrator
+4. Navigate to the extracted folder
+5. Run the installation script:
+
+```powershell
+.\install.ps1
+```
+
+Or download and run directly:
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main/install.ps1" -OutFile "install.ps1"; .\install.ps1
+```
+
 # Command Line Interface (CLI)
 
+### Linux:
 ```bash
 winnet-xui
 ```
+
+### Windows:
+```cmd
+winnet-xui
+```
+
 ### [View educational video](https://youtu.be/O2VB6tuER9A)
 
 ## 🎁 Financial support

@@ -29,18 +29,39 @@
 
 نصب هوشمند و خودکار تمام پیش نیاز ها و پیکربندی کامل اسکریپت
 
-### ⚡️ دستور نصب سریع :
+### ⚡️ دستور نصب سریع لینوکس:
 
 ```bash
 apt install curl -y && bash <(curl -s https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main/install.sh --ipv4)
 ```
 
+### ⚡️ دستور نصب سریع ویندوز:
 
+1. فایل های پروژه را از GitHub دانلود کنید
+2. فایل ZIP را استخراج کنید
+3. PowerShell را به عنوان Administrator باز کنید
+4. به پوشه استخراج شده بروید
+5. اسکریپت نصب را اجرا کنید:
+
+```powershell
+.\install.ps1
+```
+
+یا دانلود و اجرای مستقیم:
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main/install.ps1" -OutFile "install.ps1"; .\install.ps1
+```
 
 # رابط خط فرمان (CLI)
 
-
+### لینوکس:
 ```bash
+winnet-xui
+```
+
+### ویندوز:
+```cmd
 winnet-xui
 ```
 

@@ -6,6 +6,23 @@ from datetime import datetime
 
 DB_DEFAULT = "/etc/x-ui/x-ui.db"
 
+def get_db_path():
+    import platform
+    if platform.system() == "Windows":
+        while True:
+            folder = input("Enter the x-ui installation folder (e.g., C:\\x-ui): ").strip()
+            if not folder:
+                print("Folder path cannot be empty. Please try again.")
+                continue
+            db_path = os.path.join(folder, "x-ui.db")
+            if os.path.exists(db_path):
+                return db_path
+            else:
+                print(f"Database file not found at {db_path}. Please check the path.")
+                continue
+    else:
+        return DB_DEFAULT
+
 def jload(s):
     if isinstance(s, dict): return s
     try: return json.loads(s)
@@ -480,13 +497,16 @@ def sync_once(conn, apply=False, debug=False):
 
 def main():
     ap=argparse.ArgumentParser()
-    ap.add_argument("--db", default=DB_DEFAULT)
+    ap.add_argument("--db", default=None)
     ap.add_argument("--interval", type=int, default=30)
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--backup", action="store_true")
     ap.add_argument("--init", action="store_true")
     ap.add_argument("--debug", action="store_true")
     args=ap.parse_args()
+
+    if not args.db:
+        args.db = get_db_path()
 
     if not os.path.exists(args.db):
         print("[ERROR] DB not found:", args.db); return
